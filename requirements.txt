@@ -19,6 +19,7 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.2.1
 pytz==2026.3.post1
 requests==2.32.5
+scipy==1.13.1
 service-identity==26.1.0
 six==1.17.0
 tomli==2.4.1
