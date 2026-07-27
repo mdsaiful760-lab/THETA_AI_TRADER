@@ -1,0 +1,5 @@
+print("=" * 50)
+print("🚀 Welcome to THETA AI Trader")
+print("Developed by: Saif")
+print("Project Status: Day 1")
+print("=" * 50)
