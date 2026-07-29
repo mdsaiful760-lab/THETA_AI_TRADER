@@ -551,3 +551,291 @@ class OptionSelector:
         )
 
         return liquid_options
+
+    # --------------------------------------------------------
+    # ENRICH OPTIONS WITH IV AND GREEKS
+    # --------------------------------------------------------
+
+
+    def enrich_with_greeks(
+        self,
+        options,
+        spot_price,
+        greeks_engine,
+    ):
+        """
+        Calculate implied volatility and Greeks for
+        each liquid option contract.
+
+        Contracts whose IV cannot be solved are skipped.
+        """
+
+        if not options:
+            raise ValueError(
+                "No options provided for Greeks enrichment"
+            )
+
+        spot_price = float(spot_price)
+
+        if spot_price <= 0:
+            raise ValueError(
+                "Spot price must be greater than zero"
+            )
+
+        enriched_options = []
+        rejected_count = 0
+
+        for option in options:
+
+            try:
+                time_to_expiry = (
+                    greeks_engine.time_to_expiry(
+                        option["expiry"]
+                    )
+                )
+
+                implied_volatility = (
+                    greeks_engine.implied_volatility(
+                        market_price=option["ltp"],
+                        spot=spot_price,
+                        strike=option["strike"],
+                        time_to_expiry=time_to_expiry,
+                        option_type=option["option_type"],
+                    )
+                )
+
+                greeks = (
+                    greeks_engine.calculate_greeks(
+                        spot=spot_price,
+                        strike=option["strike"],
+                        time_to_expiry=time_to_expiry,
+                        volatility=implied_volatility,
+                        option_type=option["option_type"],
+                    )
+                )
+
+                enriched_option = option.copy()
+
+                enriched_option[
+                    "time_to_expiry"
+                ] = time_to_expiry
+
+                enriched_option[
+                    "implied_volatility"
+                ] = implied_volatility
+
+                enriched_option[
+                    "delta"
+                ] = greeks["delta"]
+
+                enriched_option[
+                    "gamma"
+                ] = greeks["gamma"]
+
+                enriched_option[
+                    "theta"
+                ] = greeks["theta"]
+
+                enriched_option[
+                    "vega"
+                ] = greeks["vega"]
+
+                enriched_options.append(
+                    enriched_option
+                )
+
+            except (ValueError, KeyError, TypeError):
+                rejected_count += 1
+                continue
+
+        if not enriched_options:
+            raise ValueError(
+                "Unable to calculate Greeks for any option"
+            )
+
+        self.reasons.append(
+            f"Greeks calculated for "
+            f"{len(enriched_options)} of "
+            f"{len(options)} liquid contracts"
+        )
+
+        if rejected_count > 0:
+            self.reasons.append(
+                f"Greeks rejected for "
+                f"{rejected_count} contracts"
+            )
+
+        return enriched_options
+
+    # --------------------------------------------------------
+    # SELECT OPTION BY TARGET DELTA
+    # --------------------------------------------------------
+
+    def select_by_target_delta(
+        self,
+        options,
+        spot_price,
+        option_type,
+        target_delta,
+        max_delta_difference=0.05,
+    ):
+        """
+        Select the liquid OTM option whose Delta is
+        closest to the requested target Delta.
+
+        Returns None when no acceptable candidate exists.
+        """
+
+        if not options:
+            raise ValueError(
+                "No Greeks-enriched options provided"
+            )
+
+        spot_price = float(spot_price)
+        target_delta = float(target_delta)
+        option_type = str(option_type).upper()
+
+        if option_type not in ("CE", "PE"):
+            raise ValueError(
+                "Option type must be CE or PE"
+            )
+
+        candidates = []
+
+        for option in options:
+
+            if option["option_type"] != option_type:
+                continue
+
+            strike = float(option["strike"])
+            delta = float(option["delta"])
+
+            # Only OTM options are eligible.
+            if option_type == "CE":
+                if strike <= spot_price:
+                    continue
+
+            elif option_type == "PE":
+                if strike >= spot_price:
+                    continue
+
+            delta_difference = abs(
+                delta - target_delta
+            )
+
+            candidates.append(
+                (
+                    delta_difference,
+                    option,
+                )
+            )
+
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda item: item[0]
+        )
+
+        best_difference, best_option = (
+            candidates[0]
+        )
+
+        if best_difference > max_delta_difference:
+            self.reasons.append(
+                f"No {option_type} found within "
+                f"{max_delta_difference:.2f} Delta "
+                f"of target {target_delta:+.2f}"
+            )
+
+            return None
+
+        self.reasons.append(
+            f"Selected {best_option['strike']:.0f} "
+            f"{option_type} at Delta "
+            f"{best_option['delta']:+.4f} "
+            f"for target {target_delta:+.2f}"
+        )
+
+        return best_option
+
+
+    # --------------------------------------------------------
+    # EXECUTION QUALITY CHECK
+    # --------------------------------------------------------
+
+    def check_execution_quality(
+        self,
+        option,
+        max_spread_pct=4.0,
+        min_volume=100000,
+        min_oi=50000,
+    ):
+        """
+        Final liquidity/quality gate before an option
+        can be considered suitable for execution.
+
+        This method does NOT place an order.
+        """
+
+        if not option:
+            return {
+                "approved": False,
+                "reasons": [
+                    "No option candidate provided"
+                ],
+            }
+
+        reasons = []
+
+        spread_pct = option.get(
+            "spread_pct"
+        )
+
+        volume = int(
+            option.get("volume", 0)
+        )
+
+        oi = int(
+            option.get("oi", 0)
+        )
+
+        if spread_pct is None:
+            reasons.append(
+                "Bid-ask spread unavailable"
+            )
+
+        elif spread_pct > max_spread_pct:
+            reasons.append(
+                f"Spread {spread_pct:.2f}% exceeds "
+                f"execution limit {max_spread_pct:.2f}%"
+            )
+
+        if volume < min_volume:
+            reasons.append(
+                f"Volume {volume} below minimum "
+                f"{min_volume}"
+            )
+
+        if oi < min_oi:
+            reasons.append(
+                f"OI {oi} below minimum "
+                f"{min_oi}"
+            )
+
+        approved = (
+            len(reasons) == 0
+        )
+
+        if approved:
+            reasons.append(
+                "Execution quality checks passed"
+            )
+
+        return {
+            "approved": approved,
+            "spread_pct": spread_pct,
+            "volume": volume,
+            "oi": oi,
+            "reasons": reasons,
+        }
