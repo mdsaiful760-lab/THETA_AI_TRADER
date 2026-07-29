@@ -6,6 +6,7 @@
 from market_data_engine import MarketDataEngine
 from indicator_engine import IndicatorEngine
 from regime_engine import RegimeEngine
+from market_data_safety import MarketDataSafety
 
 
 print("=" * 75)
@@ -22,6 +23,8 @@ market_data_engine = MarketDataEngine()
 indicator_engine = IndicatorEngine()
 
 regime_engine = RegimeEngine()
+
+market_data_safety = MarketDataSafety()
 
 
 # ============================================================
@@ -40,6 +43,42 @@ if not candles:
         "No NIFTY candles available"
     )
 
+
+# ============================================================
+# MARKET DATA SAFETY CHECK
+# ============================================================
+
+latest_candle_timestamp = candles[-1]["date"]
+
+data_safety = (
+    market_data_safety.validate_candle_freshness(
+        latest_candle_timestamp
+    )
+)
+
+print(
+    f"🛡️ Market Data Safety : "
+    f"{data_safety['status']}"
+)
+
+print(
+    f"🕒 Candle Age         : "
+    f"{data_safety['age_minutes']:.2f} minutes"
+)
+
+print(
+    f"📋 Safety Reason      : "
+    f"{data_safety['reason']}"
+)
+
+
+if not data_safety["safe"]:
+
+    raise RuntimeError(
+        "Market data safety check failed: "
+        f"{data_safety['status']} — "
+        f"{data_safety['reason']}"
+    )
 
 # ============================================================
 # RUN INDICATOR ENGINE
