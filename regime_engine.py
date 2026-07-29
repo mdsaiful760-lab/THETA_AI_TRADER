@@ -448,6 +448,19 @@ class RegimeEngine:
             )
 
         # ----------------------------------------------------
+        # UNCERTAIN / CONFLICTING MARKET
+        # ----------------------------------------------------
+
+        else:
+            self.regime = "UNCERTAIN"
+            self.confidence = 40
+
+            self.reasons.append(
+                "Market signals are conflicting or insufficient "
+                "for a reliable regime classification"
+            )
+
+        # ----------------------------------------------------
         # FINAL TRADING PERMISSION
         # ----------------------------------------------------
 
