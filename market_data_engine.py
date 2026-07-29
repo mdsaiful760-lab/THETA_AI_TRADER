@@ -213,3 +213,274 @@ class MarketDataEngine:
             )
 
         return vix
+
+
+
+    # --------------------------------------------------------
+    # NIFTY OPTION CHAIN SNAPSHOT
+    # --------------------------------------------------------
+
+    def get_nifty_option_snapshot(
+        self,
+        strike_range=10,
+    ):
+        """
+        Fetch a normalized NIFTY option-chain snapshot
+        around the current ATM strike.
+
+        Returns:
+        - Spot
+        - Nearest expiry
+        - ATM strike
+        - Option price
+        - Open Interest
+        - Volume
+        - Bid / Ask
+        """
+
+        from datetime import date
+
+        # ----------------------------------------------------
+        # GET NIFTY SPOT
+        # ----------------------------------------------------
+
+        spot_data = self.kite.ltp(
+            "NSE:NIFTY 50"
+        )
+
+        spot = float(
+            spot_data["NSE:NIFTY 50"][
+                "last_price"
+            ]
+        )
+
+        # ----------------------------------------------------
+        # LOAD NFO INSTRUMENTS
+        # ----------------------------------------------------
+
+        instruments = self.kite.instruments(
+            "NFO"
+        )
+
+        nifty_options = [
+            instrument
+            for instrument in instruments
+            if instrument.get("name") == "NIFTY"
+            and instrument.get(
+                "instrument_type"
+            ) in ("CE", "PE")
+        ]
+
+        if not nifty_options:
+            raise RuntimeError(
+                "No NIFTY options found"
+            )
+
+        # ----------------------------------------------------
+        # FIND NEAREST EXPIRY
+        # ----------------------------------------------------
+
+        today = date.today()
+
+        expiries = sorted({
+            instrument["expiry"]
+            for instrument in nifty_options
+            if instrument["expiry"] >= today
+        })
+
+        if not expiries:
+            raise RuntimeError(
+                "No future NIFTY expiry found"
+            )
+
+        expiry = expiries[0]
+
+        expiry_options = [
+            instrument
+            for instrument in nifty_options
+            if instrument["expiry"] == expiry
+        ]
+
+        # ----------------------------------------------------
+        # FIND ATM
+        # ----------------------------------------------------
+
+        strikes = sorted({
+            float(instrument["strike"])
+            for instrument in expiry_options
+        })
+
+        if len(strikes) < 2:
+            raise RuntimeError(
+                "Not enough NIFTY strikes found"
+            )
+
+        atm = min(
+            strikes,
+            key=lambda strike: abs(
+                strike - spot
+            ),
+        )
+
+        # ----------------------------------------------------
+        # DETERMINE STRIKE STEP
+        # ----------------------------------------------------
+
+        strike_steps = [
+            strikes[index + 1]
+            - strikes[index]
+            for index in range(
+                len(strikes) - 1
+            )
+            if (
+                strikes[index + 1]
+                > strikes[index]
+            )
+        ]
+
+        strike_step = min(
+            strike_steps
+        )
+
+        minimum_strike = (
+            atm
+            - strike_range * strike_step
+        )
+
+        maximum_strike = (
+            atm
+            + strike_range * strike_step
+        )
+
+        selected_instruments = [
+            instrument
+            for instrument in expiry_options
+            if (
+                minimum_strike
+                <= float(
+                    instrument["strike"]
+                )
+                <= maximum_strike
+            )
+        ]
+
+        # ----------------------------------------------------
+        # FETCH LIVE QUOTES
+        # ----------------------------------------------------
+
+        symbols = [
+            (
+                "NFO:"
+                + instrument["tradingsymbol"]
+            )
+            for instrument
+            in selected_instruments
+        ]
+
+        if not symbols:
+            raise RuntimeError(
+                "No option symbols selected"
+            )
+
+        quotes = self.kite.quote(
+            symbols
+        )
+
+        # ----------------------------------------------------
+        # NORMALIZE DATA
+        # ----------------------------------------------------
+
+        options = []
+
+        for instrument in selected_instruments:
+
+            key = (
+                "NFO:"
+                + instrument["tradingsymbol"]
+            )
+
+            quote = quotes.get(
+                key,
+                {}
+            )
+
+            depth = quote.get(
+                "depth",
+                {}
+            )
+
+            buy_depth = depth.get(
+                "buy",
+                []
+            )
+
+            sell_depth = depth.get(
+                "sell",
+                []
+            )
+
+            best_bid = (
+                float(
+                    buy_depth[0].get(
+                        "price",
+                        0,
+                    )
+                )
+                if buy_depth
+                else 0.0
+            )
+
+            best_ask = (
+                float(
+                    sell_depth[0].get(
+                        "price",
+                        0,
+                    )
+                )
+                if sell_depth
+                else 0.0
+            )
+
+            options.append({
+                "strike": float(
+                    instrument["strike"]
+                ),
+                "option_type": (
+                    instrument[
+                        "instrument_type"
+                    ]
+                ),
+                "symbol": (
+                    instrument[
+                        "tradingsymbol"
+                    ]
+                ),
+                "price": float(
+                    quote.get(
+                        "last_price",
+                        0,
+                    ) or 0
+                ),
+                "oi": int(
+                    quote.get(
+                        "oi",
+                        0,
+                    ) or 0
+                ),
+                "volume": int(
+                    quote.get(
+                        "volume",
+                        0,
+                    ) or 0
+                ),
+                "bid": best_bid,
+                "ask": best_ask,
+            })
+
+        return {
+            "spot": spot,
+            "expiry": expiry,
+            "atm": atm,
+            "strike_step": strike_step,
+            "options": options,
+        }
