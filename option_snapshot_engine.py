@@ -9,7 +9,7 @@ from datetime import datetime
 
 class OptionSnapshotEngine:
     """
-    Stores and loads option-chain snapshots.
+    Stores, loads, and compares option-chain snapshots.
 
     Each snapshot can contain:
     - Timestamp
@@ -75,7 +75,11 @@ class OptionSnapshotEngine:
         self.ensure_directory()
 
         snapshot = {
-            "timestamp": datetime.now().astimezone().isoformat(),
+            "timestamp": (
+                datetime.now()
+                .astimezone()
+                .isoformat()
+            ),
             "spot": float(spot),
             "expiry": str(expiry),
             "options": options,
@@ -121,8 +125,6 @@ class OptionSnapshotEngine:
 
         return snapshot
 
-
-
     # --------------------------------------------------------
     # COMPARE OPTION SNAPSHOTS
     # --------------------------------------------------------
@@ -140,8 +142,12 @@ class OptionSnapshotEngine:
         - Strike
         - Option type
 
-        Returns price/OI changes and OI Engine
-        classifications for each matching contract.
+        Calculates:
+        - Price change %
+        - Absolute OI change
+        - OI change %
+        - OI activity classification
+        - Support/resistance interpretation
         """
 
         if not previous_snapshot:
@@ -170,10 +176,16 @@ class OptionSnapshotEngine:
 
         previous_map = {}
 
+        # ----------------------------------------------------
+        # BUILD PREVIOUS CONTRACT MAP
+        # ----------------------------------------------------
+
         for option in previous_options:
 
             key = (
-                float(option["strike"]),
+                float(
+                    option["strike"]
+                ),
                 str(
                     option["option_type"]
                 ).upper(),
@@ -183,10 +195,16 @@ class OptionSnapshotEngine:
 
         comparisons = []
 
+        # ----------------------------------------------------
+        # COMPARE CURRENT CONTRACTS
+        # ----------------------------------------------------
+
         for current in current_options:
 
             key = (
-                float(current["strike"]),
+                float(
+                    current["strike"]
+                ),
                 str(
                     current["option_type"]
                 ).upper(),
@@ -227,13 +245,30 @@ class OptionSnapshotEngine:
                 ) or 0
             )
 
-            # Cannot calculate percentage change
-            # safely from zero values.
+            # ------------------------------------------------
+            # DATA VALIDATION
+            # ------------------------------------------------
+
+            # Percentage change cannot safely be calculated
+            # when the previous price or previous OI is zero.
             if (
                 previous_price <= 0
                 or previous_oi <= 0
             ):
                 continue
+
+            # ------------------------------------------------
+            # ABSOLUTE OI CHANGE
+            # ------------------------------------------------
+
+            oi_change = (
+                current_oi
+                - previous_oi
+            )
+
+            # ------------------------------------------------
+            # CLASSIFY PRICE + OI ACTIVITY
+            # ------------------------------------------------
 
             activity = oi_engine.classify(
                 previous_price=previous_price,
@@ -241,6 +276,10 @@ class OptionSnapshotEngine:
                 previous_oi=previous_oi,
                 current_oi=current_oi,
             )
+
+            # ------------------------------------------------
+            # INTERPRET CE / PE ACTIVITY
+            # ------------------------------------------------
 
             interpretation = (
                 oi_engine.interpret_option_activity(
@@ -251,29 +290,53 @@ class OptionSnapshotEngine:
                 )
             )
 
+            # ------------------------------------------------
+            # BUILD NORMALIZED COMPARISON
+            # ------------------------------------------------
+
             comparisons.append({
                 "strike": key[0],
+
                 "option_type": key[1],
+
                 "symbol": current.get(
                     "symbol"
                 ),
+
                 "previous_price": (
                     previous_price
                 ),
+
                 "current_price": (
                     current_price
                 ),
+
                 "price_change_pct": activity[
                     "price_change_pct"
                 ],
-                "previous_oi": previous_oi,
-                "current_oi": current_oi,
+
+                "previous_oi": (
+                    previous_oi
+                ),
+
+                "current_oi": (
+                    current_oi
+                ),
+
+                # Absolute OI contracts added/removed
+                "oi_change": (
+                    oi_change
+                ),
+
+                # Percentage OI change
                 "oi_change_pct": activity[
                     "oi_change_pct"
                 ],
+
                 "classification": activity[
                     "classification"
                 ],
+
                 "interpretation": interpretation[
                     "interpretation"
                 ],
