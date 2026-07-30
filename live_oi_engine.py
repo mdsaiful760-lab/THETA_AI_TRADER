@@ -18,7 +18,7 @@ class LiveOIEngine:
     2. Load previous stored snapshot
     3. Validate expiry / contracts / timestamps / session
     4. Compare T1 vs T2
-    5. Run whole-chain OI intelligence
+    5. Run advanced whole-chain OI intelligence
     6. Save current snapshot for next cycle
 
     This engine does NOT:
@@ -184,6 +184,7 @@ class LiveOIEngine:
                         str(value)
                     )
                 )
+
         except (
             TypeError,
             ValueError,
@@ -396,6 +397,7 @@ class LiveOIEngine:
                     "Current snapshot has the same timestamp "
                     "as the previous snapshot"
                 )
+
             else:
                 status = "NON_SEQUENTIAL_TIMESTAMP"
                 reason = (
@@ -561,14 +563,18 @@ class LiveOIEngine:
 
         return {
             "valid": True,
+
             "status": "VALID",
+
             "reason": (
                 "Snapshots are compatible for "
                 "intraday OI comparison"
             ),
+
             "common_contracts": len(
                 common_contracts
             ),
+
             "gap_minutes": round(
                 gap_minutes,
                 2,
@@ -633,7 +639,7 @@ class LiveOIEngine:
 
         Valid later run:
             Compare previous vs current,
-            analyze OI structure,
+            run advanced OI structure analysis,
             then save current snapshot.
         """
 
@@ -758,13 +764,50 @@ class LiveOIEngine:
             }
 
         # ----------------------------------------------------
-        # WHOLE-CHAIN ANALYSIS
+        # ADVANCED WHOLE-CHAIN ANALYSIS
+        # ----------------------------------------------------
+        #
+        # Pass BOTH:
+        #
+        # 1. T1 -> T2 comparisons
+        #    Used for fresh OI addition / unwinding.
+        #
+        # 2. Current T2 option chain
+        #    Used for absolute OI structure such as:
+        #    - Major resistance
+        #    - Major support
+        #    - Current OI PCR
+        #    - Near-ATM PCR
+        #    - OI concentration
+        #    - Spot position inside OI range
+        #
+        # This allows OIEngine to combine current structure
+        # with changing structure.
         # ----------------------------------------------------
 
         chain_analysis = (
             self.oi_engine
             .analyze_chain(
-                comparisons
+                comparisons=comparisons,
+
+                current_options=(
+                    current_snapshot.get(
+                        "options",
+                        [],
+                    )
+                ),
+
+                spot=(
+                    current_snapshot.get(
+                        "spot"
+                    )
+                ),
+
+                atm=(
+                    current_snapshot.get(
+                        "atm"
+                    )
+                ),
             )
         )
 
@@ -782,7 +825,7 @@ class LiveOIEngine:
             "analysis_ready": True,
 
             "reason": (
-                "OI comparison and whole-chain "
+                "OI comparison and advanced whole-chain "
                 "analysis completed"
             ),
 
