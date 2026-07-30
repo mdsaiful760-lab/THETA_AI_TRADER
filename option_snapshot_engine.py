@@ -15,8 +15,9 @@ class OptionSnapshotEngine:
     - Timestamp
     - Expiry
     - Spot price
-    - Strike
-    - Option type
+    - ATM strike
+    - Strike step
+    - Option contracts
     - Option premium
     - Open Interest
 
@@ -60,11 +61,20 @@ class OptionSnapshotEngine:
         spot,
         expiry,
         options,
+        timestamp=None,
+        atm=None,
+        strike_step=None,
     ):
         """
         Save the latest option-chain snapshot.
 
-        options must be a list of dictionaries.
+        If timestamp is supplied, preserve it exactly.
+        This is important because the timestamp used for
+        validation must be the same timestamp stored for
+        the next T1 -> T2 comparison.
+
+        Backward compatibility:
+        If timestamp is not supplied, generate one here.
         """
 
         if not options:
@@ -74,16 +84,43 @@ class OptionSnapshotEngine:
 
         self.ensure_directory()
 
-        snapshot = {
-            "timestamp": (
+        if timestamp is None:
+            timestamp = (
                 datetime.now()
                 .astimezone()
                 .isoformat()
-            ),
+            )
+        elif isinstance(
+            timestamp,
+            datetime,
+        ):
+            timestamp = (
+                timestamp.isoformat()
+            )
+        else:
+            timestamp = str(
+                timestamp
+            )
+
+        snapshot = {
+            "timestamp": timestamp,
             "spot": float(spot),
             "expiry": str(expiry),
             "options": options,
         }
+
+        # Optional metadata.
+        # Keep these only when available so older code
+        # remains compatible with this engine.
+        if atm is not None:
+            snapshot["atm"] = float(
+                atm
+            )
+
+        if strike_step is not None:
+            snapshot["strike_step"] = float(
+                strike_step
+            )
 
         with open(
             self.snapshot_file,
@@ -249,8 +286,6 @@ class OptionSnapshotEngine:
             # DATA VALIDATION
             # ------------------------------------------------
 
-            # Percentage change cannot safely be calculated
-            # when the previous price or previous OI is zero.
             if (
                 previous_price <= 0
                 or previous_oi <= 0
@@ -296,7 +331,6 @@ class OptionSnapshotEngine:
 
             comparisons.append({
                 "strike": key[0],
-
                 "option_type": key[1],
 
                 "symbol": current.get(
@@ -323,12 +357,10 @@ class OptionSnapshotEngine:
                     current_oi
                 ),
 
-                # Absolute OI contracts added/removed
                 "oi_change": (
                     oi_change
                 ),
 
-                # Percentage OI change
                 "oi_change_pct": activity[
                     "oi_change_pct"
                 ],
