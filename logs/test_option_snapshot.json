@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-07-30T02:25:10.304792+05:30",
+  "spot": 24250.0,
+  "expiry": "2026-08-04",
+  "options": [
+    {
+      "strike": 24200,
+      "option_type": "CE",
+      "price": 120.5,
+      "oi": 100000
+    },
+    {
+      "strike": 24200,
+      "option_type": "PE",
+      "price": 85.5,
+      "oi": 125000
+    }
+  ]
+}

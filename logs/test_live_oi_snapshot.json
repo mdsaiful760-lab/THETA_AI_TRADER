@@ -1,0 +1,149 @@
+{
+  "timestamp": "2026-07-30T13:42:17.653767+05:30",
+  "spot": 24296.75,
+  "expiry": "2026-08-04",
+  "options": [
+    {
+      "strike": 24250.0,
+      "option_type": "CE",
+      "symbol": "NIFTY2680424250CE",
+      "price": 138.2,
+      "oi": 4933045,
+      "volume": 114968750,
+      "bid": 138.0,
+      "ask": 138.35
+    },
+    {
+      "strike": 24250.0,
+      "option_type": "PE",
+      "symbol": "NIFTY2680424250PE",
+      "price": 93.0,
+      "oi": 7922200,
+      "volume": 106021305,
+      "bid": 92.95,
+      "ask": 93.1
+    },
+    {
+      "strike": 24300.0,
+      "option_type": "CE",
+      "symbol": "NIFTY2680424300CE",
+      "price": 110.0,
+      "oi": 8490430,
+      "volume": 141895845,
+      "bid": 109.65,
+      "ask": 109.9
+    },
+    {
+      "strike": 24300.0,
+      "option_type": "PE",
+      "symbol": "NIFTY2680424300PE",
+      "price": 115.0,
+      "oi": 7525375,
+      "volume": 105397890,
+      "bid": 115.0,
+      "ask": 115.15
+    },
+    {
+      "strike": 24200.0,
+      "option_type": "CE",
+      "symbol": "NIFTY2680424200CE",
+      "price": 169.1,
+      "oi": 7094555,
+      "volume": 99321495,
+      "bid": 169.1,
+      "ask": 169.45
+    },
+    {
+      "strike": 24200.0,
+      "option_type": "PE",
+      "symbol": "NIFTY2680424200PE",
+      "price": 74.6,
+      "oi": 14407705,
+      "volume": 121447300,
+      "bid": 74.45,
+      "ask": 74.6
+    },
+    {
+      "strike": 24350.0,
+      "option_type": "CE",
+      "symbol": "NIFTY2680424350CE",
+      "price": 85.25,
+      "oi": 2935270,
+      "volume": 53359020,
+      "bid": 85.1,
+      "ask": 85.35
+    },
+    {
+      "strike": 24350.0,
+      "option_type": "PE",
+      "symbol": "NIFTY2680424350PE",
+      "price": 140.05,
+      "oi": 1794845,
+      "volume": 25642435,
+      "bid": 140.2,
+      "ask": 140.55
+    },
+    {
+      "strike": 24150.0,
+      "option_type": "CE",
+      "symbol": "NIFTY2680424150CE",
+      "price": 203.7,
+      "oi": 1386450,
+      "volume": 24615045,
+      "bid": 203.7,
+      "ask": 204.0
+    },
+    {
+      "strike": 24150.0,
+      "option_type": "PE",
+      "symbol": "NIFTY2680424150PE",
+      "price": 58.9,
+      "oi": 5057130,
+      "volume": 42888365,
+      "bid": 59.0,
+      "ask": 59.15
+    },
+    {
+      "strike": 24400.0,
+      "option_type": "CE",
+      "symbol": "NIFTY2680424400CE",
+      "price": 64.2,
+      "oi": 5726825,
+      "volume": 68235505,
+      "bid": 64.2,
+      "ask": 64.4
+    },
+    {
+      "strike": 24400.0,
+      "option_type": "PE",
+      "symbol": "NIFTY2680424400PE",
+      "price": 169.35,
+      "oi": 1850420,
+      "volume": 24421865,
+      "bid": 169.3,
+      "ask": 169.75
+    },
+    {
+      "strike": 24450.0,
+      "option_type": "CE",
+      "symbol": "NIFTY2680424450CE",
+      "price": 47.15,
+      "oi": 2932800,
+      "volume": 44118165,
+      "bid": 47.05,
+      "ask": 47.15
+    },
+    {
+      "strike": 24450.0,
+      "option_type": "PE",
+      "symbol": "NIFTY2680424450PE",
+      "price": 201.75,
+      "oi": 438100,
+      "volume": 4883580,
+      "bid": 201.95,
+      "ask": 202.5
+    }
+  ],
+  "atm": 24300.0,
+  "strike_step": 50.0
+}

@@ -1,0 +1,48 @@
+{
+  "oi": {
+    "max_snapshot_gap_minutes": 15.0,
+    "min_snapshot_gap_minutes": 1.0,
+    "strike_range": 10
+  },
+  "position_sizing": {
+    "expiry_max_lots_per_trade": 5,
+    "max_lots_per_trade": 10
+  },
+  "risk": {
+    "caution_risk_multiplier": 0.5,
+    "expiry_risk_multiplier": 0.5,
+    "max_account_drawdown_pct": 10.0,
+    "max_consecutive_losses": 3,
+    "max_daily_loss_pct": 3.0,
+    "max_open_positions": 3,
+    "max_risk_per_trade_pct": 1.0,
+    "medium_confidence_multiplier": 0.75,
+    "minimum_risk_multiplier": 0.25
+  },
+  "risk_budget": {
+    "allocation_mode": "FIXED",
+    "confidence_multiplier_exceptional": 1.25,
+    "confidence_multiplier_high": 1.0,
+    "confidence_multiplier_low": 0.5,
+    "confidence_multiplier_medium": 0.75,
+    "confidence_scaling_enabled": true,
+    "intelligent_reference_trades": 3,
+    "max_single_trade_daily_risk_pct": 40.0,
+    "max_trades_per_day": 3,
+    "minimum_setup_score": 60.0
+  },
+  "signal": {
+    "allow_caution_signals": true,
+    "minimum_confidence": "MEDIUM"
+  },
+  "system": {
+    "config_version": 40,
+    "environment": "PAPER",
+    "last_updated": "2026-07-31T05:21:49.433672+05:30"
+  },
+  "trading": {
+    "expiry_trading_enabled": true,
+    "new_entries_enabled": true,
+    "trading_enabled": true
+  }
+}
