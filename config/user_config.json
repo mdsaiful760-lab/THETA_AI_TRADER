@@ -36,9 +36,9 @@
     "minimum_confidence": "MEDIUM"
   },
   "system": {
-    "config_version": 40,
+    "config_version": 48,
     "environment": "PAPER",
-    "last_updated": "2026-07-31T05:21:49.433672+05:30"
+    "last_updated": "2026-07-31T21:36:22.131976+05:30"
   },
   "trading": {
     "expiry_trading_enabled": true,

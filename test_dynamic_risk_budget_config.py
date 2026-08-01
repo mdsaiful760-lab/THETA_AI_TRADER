@@ -1,6 +1,6 @@
 # ============================================================
 # THETA AI TRADER
-# DYNAMIC RISK BUDGET CONFIGURATION TEST
+# FINAL DYNAMIC RISK BUDGET CONFIGURATION TEST
 # ============================================================
 
 from config_manager import ConfigManager
@@ -29,10 +29,13 @@ def subheading(title):
     line("-", 78)
 
 
+# ============================================================
+# ASSERTION HELPERS
+# ============================================================
+
 def assert_equal(actual, expected, message):
 
     if actual != expected:
-
         raise AssertionError(
             f"{message}\n"
             f"Expected: {expected}\n"
@@ -47,10 +50,7 @@ def assert_close(
     tolerance=0.02,
 ):
 
-    if abs(
-        float(actual) - float(expected)
-    ) > tolerance:
-
+    if abs(float(actual) - float(expected)) > tolerance:
         raise AssertionError(
             f"{message}\n"
             f"Expected: {expected}\n"
@@ -61,7 +61,6 @@ def assert_close(
 def assert_true(value, message):
 
     if value is not True:
-
         raise AssertionError(
             f"{message}\n"
             f"Expected: True\n"
@@ -70,8 +69,115 @@ def assert_true(value, message):
 
 
 # ============================================================
-# CONFIG UPDATE HELPER
+# CONFIG HELPERS
 # ============================================================
+
+def capture_risk_budget_config(config):
+
+    current = config.get_risk_budget_config()
+
+    return {
+        "allocation_mode":
+            current["allocation_mode"],
+
+        "max_trades_per_day":
+            current["max_trades_per_day"],
+
+        "confidence_scaling_enabled":
+            current["confidence_scaling_enabled"],
+
+        "minimum_setup_score":
+            current["minimum_setup_score"],
+
+        "max_single_trade_daily_risk_pct":
+            current[
+                "max_single_trade_daily_risk_pct"
+            ],
+
+        "intelligent_reference_trades":
+            current[
+                "intelligent_reference_trades"
+            ],
+
+        "confidence_multiplier_low":
+            current[
+                "confidence_multiplier_low"
+            ],
+
+        "confidence_multiplier_medium":
+            current[
+                "confidence_multiplier_medium"
+            ],
+
+        "confidence_multiplier_high":
+            current[
+                "confidence_multiplier_high"
+            ],
+
+        "confidence_multiplier_exceptional":
+            current[
+                "confidence_multiplier_exceptional"
+            ],
+    }
+
+
+def apply_risk_budget_config(
+    config,
+    values,
+):
+
+    config.update_many(
+        {
+            "risk_budget": {
+                "allocation_mode":
+                    values["allocation_mode"],
+
+                "max_trades_per_day":
+                    values["max_trades_per_day"],
+
+                "confidence_scaling_enabled":
+                    values[
+                        "confidence_scaling_enabled"
+                    ],
+
+                "minimum_setup_score":
+                    values[
+                        "minimum_setup_score"
+                    ],
+
+                "max_single_trade_daily_risk_pct":
+                    values[
+                        "max_single_trade_daily_risk_pct"
+                    ],
+
+                "intelligent_reference_trades":
+                    values[
+                        "intelligent_reference_trades"
+                    ],
+
+                "confidence_multiplier_low":
+                    values[
+                        "confidence_multiplier_low"
+                    ],
+
+                "confidence_multiplier_medium":
+                    values[
+                        "confidence_multiplier_medium"
+                    ],
+
+                "confidence_multiplier_high":
+                    values[
+                        "confidence_multiplier_high"
+                    ],
+
+                "confidence_multiplier_exceptional":
+                    values[
+                        "confidence_multiplier_exceptional"
+                    ],
+            }
+        }
+    )
+
 
 def update_risk_budget(
     config,
@@ -79,13 +185,101 @@ def update_risk_budget(
     value,
 ):
 
-    result = config.update_setting(
+    return config.update_setting(
         "risk_budget",
         key,
         value,
     )
 
-    return result
+
+def verify_config(
+    actual,
+    expected,
+):
+
+    assert_equal(
+        actual["allocation_mode"],
+        expected["allocation_mode"],
+        "Allocation mode mismatch",
+    )
+
+    assert_equal(
+        actual["max_trades_per_day"],
+        expected["max_trades_per_day"],
+        "Maximum trades mismatch",
+    )
+
+    assert_equal(
+        actual["confidence_scaling_enabled"],
+        expected["confidence_scaling_enabled"],
+        "Confidence scaling mismatch",
+    )
+
+    assert_close(
+        actual["minimum_setup_score"],
+        expected["minimum_setup_score"],
+        "Minimum setup score mismatch",
+    )
+
+    assert_close(
+        actual[
+            "max_single_trade_daily_risk_pct"
+        ],
+        expected[
+            "max_single_trade_daily_risk_pct"
+        ],
+        "Single-trade cap mismatch",
+    )
+
+    assert_equal(
+        actual[
+            "intelligent_reference_trades"
+        ],
+        expected[
+            "intelligent_reference_trades"
+        ],
+        "Reference trades mismatch",
+    )
+
+    assert_close(
+        actual[
+            "confidence_multiplier_low"
+        ],
+        expected[
+            "confidence_multiplier_low"
+        ],
+        "Low multiplier mismatch",
+    )
+
+    assert_close(
+        actual[
+            "confidence_multiplier_medium"
+        ],
+        expected[
+            "confidence_multiplier_medium"
+        ],
+        "Medium multiplier mismatch",
+    )
+
+    assert_close(
+        actual[
+            "confidence_multiplier_high"
+        ],
+        expected[
+            "confidence_multiplier_high"
+        ],
+        "High multiplier mismatch",
+    )
+
+    assert_close(
+        actual[
+            "confidence_multiplier_exceptional"
+        ],
+        expected[
+            "confidence_multiplier_exceptional"
+        ],
+        "Exceptional multiplier mismatch",
+    )
 
 
 # ============================================================
@@ -96,122 +290,187 @@ def run_test():
 
     config = ConfigManager()
 
-    # --------------------------------------------------------
-    # SAVE ORIGINAL CONFIGURATION
-    # --------------------------------------------------------
+    # ========================================================
+    # STEP 1
+    # SAVE EXACT USER CONFIGURATION
+    # ========================================================
 
-    original = config.get_risk_budget_config()
-
-    original_values = {
-        "allocation_mode":
-            original["allocation_mode"],
-
-        "max_trades_per_day":
-            original["max_trades_per_day"],
-
-        "confidence_scaling_enabled":
-            original["confidence_scaling_enabled"],
-
-        "minimum_setup_score":
-            original["minimum_setup_score"],
-
-        "max_single_trade_daily_risk_pct":
-            original[
-                "max_single_trade_daily_risk_pct"
-            ],
-
-        "intelligent_reference_trades":
-            original[
-                "intelligent_reference_trades"
-            ],
-
-        "confidence_multiplier_low":
-            original[
-                "confidence_multiplier_low"
-            ],
-
-        "confidence_multiplier_medium":
-            original[
-                "confidence_multiplier_medium"
-            ],
-
-        "confidence_multiplier_high":
-            original[
-                "confidence_multiplier_high"
-            ],
-
-        "confidence_multiplier_exceptional":
-            original[
-                "confidence_multiplier_exceptional"
-            ],
-    }
+    original_values = capture_risk_budget_config(
+        config
+    )
 
     original_version = config.get_setting(
         "system",
         "config_version",
     )
 
-    # --------------------------------------------------------
-    # CREATE ONE ALLOCATOR INSTANCE
-    # --------------------------------------------------------
-    #
-    # IMPORTANT:
-    #
-    # We intentionally NEVER recreate this allocator during
-    # the tests.
-    #
-    # This proves that configuration changes reach an
-    # already-running production object.
-
-    allocator = RiskBudgetAllocator(
-        config_manager=config,
-        use_dynamic_config=True,
-    )
-
     heading(
-        "THETA AI TRADER — "
-        "DYNAMIC RISK BUDGET CONFIG TEST"
+        "THETA AI TRADER — FINAL DYNAMIC "
+        "RISK BUDGET CONFIG TEST"
     )
 
     print()
     print(
-        "Original Config Version :",
+        "Saved User Config Version :",
         original_version,
     )
 
     print(
-        "Original Allocation Mode:",
+        "Saved Allocation Mode     :",
         original_values[
             "allocation_mode"
         ],
     )
 
     print(
-        "Original Max Trades     :",
+        "Saved Max Trades          :",
         original_values[
             "max_trades_per_day"
         ],
     )
 
     print(
-        "Original Scaling        :",
+        "Saved Confidence Scaling  :",
         original_values[
             "confidence_scaling_enabled"
         ],
     )
 
     print(
-        "Original Single Cap %   :",
+        "Saved Single Trade Cap %  :",
         original_values[
             "max_single_trade_daily_risk_pct"
         ],
     )
 
+    print(
+        "Saved Medium Multiplier   :",
+        original_values[
+            "confidence_multiplier_medium"
+        ],
+    )
+
+    # ========================================================
+    # STEP 2
+    # ESTABLISH KNOWN TEST BASELINE
+    # ========================================================
+
+    test_baseline = {
+        "allocation_mode":
+            "FIXED",
+
+        "max_trades_per_day":
+            3,
+
+        "confidence_scaling_enabled":
+            True,
+
+        "minimum_setup_score":
+            60.0,
+
+        "max_single_trade_daily_risk_pct":
+            40.0,
+
+        "intelligent_reference_trades":
+            3,
+
+        "confidence_multiplier_low":
+            0.50,
+
+        "confidence_multiplier_medium":
+            0.75,
+
+        "confidence_multiplier_high":
+            1.00,
+
+        "confidence_multiplier_exceptional":
+            1.25,
+    }
+
+    allocator = None
+
     try:
+
+        subheading(
+            "ESTABLISHING ISOLATED TEST BASELINE"
+        )
+
+        apply_risk_budget_config(
+            config,
+            test_baseline,
+        )
+
+        baseline = capture_risk_budget_config(
+            config
+        )
+
+        verify_config(
+            baseline,
+            test_baseline,
+        )
+
+        baseline_version = config.get_setting(
+            "system",
+            "config_version",
+        )
+
+        print(
+            "Test Config Version  :",
+            baseline_version,
+        )
+
+        print(
+            "Allocation Mode      :",
+            baseline[
+                "allocation_mode"
+            ],
+        )
+
+        print(
+            "Max Trades / Day     :",
+            baseline[
+                "max_trades_per_day"
+            ],
+        )
+
+        print(
+            "Confidence Scaling   :",
+            baseline[
+                "confidence_scaling_enabled"
+            ],
+        )
+
+        print(
+            "Single Trade Cap %   :",
+            baseline[
+                "max_single_trade_daily_risk_pct"
+            ],
+        )
+
+        print(
+            "Medium Multiplier    :",
+            baseline[
+                "confidence_multiplier_medium"
+            ],
+        )
+
+        print()
+        print(
+            "✅ Known test baseline established atomically"
+        )
+
+        # ====================================================
+        # CREATE ONE RUNNING ALLOCATOR
+        # ====================================================
+
+        allocator = RiskBudgetAllocator(
+            config_manager=config,
+            use_dynamic_config=True,
+        )
 
         # ====================================================
         # TEST 1
-        # INITIAL LIVE CONNECTION
+        # INITIAL CONNECTION
         # ====================================================
 
         subheading(
@@ -242,33 +501,39 @@ def run_test():
 
         assert_true(
             active["dynamic_config"],
-            "Allocator should be dynamically configured",
+            "Allocator should use dynamic configuration",
         )
 
         assert_equal(
             active["allocation_mode"],
-            original_values[
-                "allocation_mode"
-            ],
-            "Allocator did not read initial allocation mode",
+            "FIXED",
+            "Allocator did not read test baseline mode",
         )
 
         assert_equal(
             active["max_trades_per_day"],
-            original_values[
-                "max_trades_per_day"
+            3,
+            "Allocator did not read test baseline "
+            "trade limit",
+        )
+
+        assert_close(
+            active[
+                "confidence_multiplier_medium"
             ],
-            "Allocator did not read initial trade limit",
+            0.75,
+            "Allocator did not read baseline "
+            "medium multiplier",
         )
 
         print(
             "✅ PASS — Running allocator reads "
-            "ConfigManager"
+            "isolated test configuration"
         )
 
         # ====================================================
         # TEST 2
-        # FIXED MODE + FOUR TRADES
+        # LIVE FIXED FOUR-TRADE CONFIGURATION
         # ====================================================
 
         subheading(
@@ -276,34 +541,25 @@ def run_test():
             "FOUR-TRADE CONFIGURATION"
         )
 
-        update_risk_budget(
-            config,
-            "allocation_mode",
-            "FIXED",
-        )
+        config.update_many(
+            {
+                "risk_budget": {
+                    "allocation_mode":
+                        "FIXED",
 
-        update_risk_budget(
-            config,
-            "max_trades_per_day",
-            4,
-        )
+                    "max_trades_per_day":
+                        4,
 
-        update_risk_budget(
-            config,
-            "confidence_scaling_enabled",
-            False,
-        )
+                    "confidence_scaling_enabled":
+                        False,
 
-        update_risk_budget(
-            config,
-            "minimum_setup_score",
-            60.0,
-        )
+                    "minimum_setup_score":
+                        60.0,
 
-        update_risk_budget(
-            config,
-            "max_single_trade_daily_risk_pct",
-            100.0,
+                    "max_single_trade_daily_risk_pct":
+                        100.0,
+                }
+            }
         )
 
         result = allocator.allocate(
@@ -343,13 +599,13 @@ def run_test():
         assert_equal(
             result["allocation_mode"],
             "FIXED",
-            "Live allocator did not switch to FIXED",
+            "Allocator did not remain in FIXED mode",
         )
 
         assert_equal(
             result["max_trades_per_day"],
             4,
-            "Live allocator did not pick up "
+            "Live allocator did not detect "
             "four-trade configuration",
         )
 
@@ -358,59 +614,61 @@ def run_test():
                 "confidence_scaling_enabled"
             ],
             False,
-            "Live allocator did not disable scaling",
+            "Live allocator did not disable "
+            "confidence scaling",
         )
-
-        # ₹12,000 / 4 = ₹3,000
 
         assert_close(
             result["approved_risk_rupees"],
             3000.0,
-            "FIXED four-trade allocation incorrect",
+            "₹12,000 / 4 should allocate ₹3,000",
         )
 
         print(
             "✅ PASS — Same allocator picked up "
-            "FIXED / 4-trade dashboard changes"
+            "FIXED / 4-trade changes"
         )
 
         # ====================================================
         # TEST 3
-        # CHANGE TO INTELLIGENT MODE
+        # LIVE FIXED -> INTELLIGENT
         # ====================================================
 
         subheading(
             "TEST 3 — LIVE FIXED → INTELLIGENT SWITCH"
         )
 
-        update_risk_budget(
-            config,
-            "allocation_mode",
-            "INTELLIGENT",
-        )
+        config.update_many(
+            {
+                "risk_budget": {
+                    "allocation_mode":
+                        "INTELLIGENT",
 
-        update_risk_budget(
-            config,
-            "max_trades_per_day",
-            3,
-        )
+                    "max_trades_per_day":
+                        3,
 
-        update_risk_budget(
-            config,
-            "confidence_scaling_enabled",
-            True,
-        )
+                    "confidence_scaling_enabled":
+                        True,
 
-        update_risk_budget(
-            config,
-            "intelligent_reference_trades",
-            3,
-        )
+                    "intelligent_reference_trades":
+                        3,
 
-        update_risk_budget(
-            config,
-            "max_single_trade_daily_risk_pct",
-            100.0,
+                    "max_single_trade_daily_risk_pct":
+                        100.0,
+
+                    "confidence_multiplier_low":
+                        0.50,
+
+                    "confidence_multiplier_medium":
+                        0.75,
+
+                    "confidence_multiplier_high":
+                        1.00,
+
+                    "confidence_multiplier_exceptional":
+                        1.25,
+                }
+            }
         )
 
         result = allocator.allocate(
@@ -450,27 +708,30 @@ def run_test():
         assert_equal(
             result["allocation_mode"],
             "INTELLIGENT",
-            "Same allocator did not switch "
-            "to INTELLIGENT",
+            "Allocator did not dynamically "
+            "switch to INTELLIGENT",
         )
 
         assert_close(
             result["confidence_multiplier"],
             0.75,
-            "Score 80 should currently use "
-            "medium multiplier",
+            "Score 80 should use test medium "
+            "multiplier 0.75",
         )
 
-        # Base:
-        # ₹30,000 / 3 = ₹10,000
-        #
-        # Medium:
-        # ₹10,000 × 0.75 = ₹7,500
+        assert_close(
+            result[
+                "base_risk_allocation_rupees"
+            ],
+            10000.0,
+            "₹30,000 / 3 reference trades "
+            "should equal ₹10,000",
+        )
 
         assert_close(
             result["approved_risk_rupees"],
             7500.0,
-            "INTELLIGENT allocation incorrect",
+            "₹10,000 × 0.75 should equal ₹7,500",
         )
 
         print(
@@ -480,21 +741,13 @@ def run_test():
 
         # ====================================================
         # TEST 4
-        # LIVE CONFIDENCE MULTIPLIER CHANGE
+        # LIVE CONFIDENCE MULTIPLIER
         # ====================================================
 
         subheading(
             "TEST 4 — LIVE CONFIDENCE "
             "MULTIPLIER CHANGE"
         )
-
-        # Change medium multiplier:
-        #
-        # 0.75 -> 0.80
-        #
-        # We must keep multiplier ordering valid:
-        #
-        # low <= medium <= high <= exceptional
 
         update_risk_budget(
             config,
@@ -524,30 +777,27 @@ def run_test():
             result["approved_risk_rupees"],
         )
 
-        # ₹10,000 × 0.80 = ₹8,000
-
         assert_close(
             result["confidence_multiplier"],
             0.80,
-            "Allocator did not pick up new "
-            "medium confidence multiplier",
+            "Running allocator did not detect "
+            "new medium multiplier",
         )
 
         assert_close(
             result["approved_risk_rupees"],
             8000.0,
-            "Updated confidence multiplier "
-            "did not affect allocation",
+            "₹10,000 × 0.80 should equal ₹8,000",
         )
 
         print(
-            "✅ PASS — Confidence multiplier changed "
-            "live without restart"
+            "✅ PASS — Confidence multiplier "
+            "changed live without restart"
         )
 
         # ====================================================
         # TEST 5
-        # SINGLE-TRADE CAP OVERRIDES 95+ CONFIDENCE
+        # SINGLE TRADE SAFETY CAP
         # ====================================================
 
         subheading(
@@ -592,32 +842,34 @@ def run_test():
             result["approved_risk_rupees"],
         )
 
-        # 20% of ₹50,000 = ₹10,000.
-        #
-        # Exceptional confidence may want more,
-        # but hard cap must win.
+        assert_close(
+            result["confidence_multiplier"],
+            1.25,
+            "97 score should use exceptional "
+            "multiplier",
+        )
 
         assert_close(
             result["single_trade_cap_rupees"],
             10000.0,
-            "Single-trade cap calculation incorrect",
+            "20% of ₹50,000 should equal ₹10,000",
         )
 
         assert_close(
             result["approved_risk_rupees"],
             10000.0,
             "Exceptional setup bypassed "
-            "single-trade risk cap",
+            "single-trade safety cap",
         )
 
         print(
             "✅ PASS — 95+ setup cannot bypass "
-            "dashboard risk cap"
+            "single-trade risk cap"
         )
 
         # ====================================================
         # TEST 6
-        # LIVE MAXIMUM TRADES CHANGE
+        # LIVE MAXIMUM TRADE LIMIT
         # ====================================================
 
         subheading(
@@ -665,21 +917,27 @@ def run_test():
         assert_equal(
             result["max_trades_per_day"],
             2,
-            "Allocator did not pick up "
-            "new max-trades setting",
+            "Running allocator did not detect "
+            "new maximum trade limit",
         )
 
         assert_equal(
             result["allocation_permission"],
             "BLOCK",
-            "Trade should be blocked after "
-            "new maximum is reached",
+            "Trade should be blocked when "
+            "maximum attempts are reached",
         )
 
         assert_equal(
             result["reason"],
             "MAX_TRADES_PER_DAY_REACHED",
-            "Wrong maximum-trade block reason",
+            "Wrong maximum-trades block reason",
+        )
+
+        assert_close(
+            result["approved_risk_rupees"],
+            0.0,
+            "Blocked trade must receive zero risk",
         )
 
         print(
@@ -689,29 +947,26 @@ def run_test():
 
         # ====================================================
         # TEST 7
-        # DISABLE CONFIDENCE SCALING LIVE
+        # LIVE CONFIDENCE SCALING OFF
         # ====================================================
 
         subheading(
             "TEST 7 — LIVE CONFIDENCE SCALING OFF"
         )
 
-        update_risk_budget(
-            config,
-            "max_trades_per_day",
-            3,
-        )
+        config.update_many(
+            {
+                "risk_budget": {
+                    "max_trades_per_day":
+                        3,
 
-        update_risk_budget(
-            config,
-            "confidence_scaling_enabled",
-            False,
-        )
+                    "confidence_scaling_enabled":
+                        False,
 
-        update_risk_budget(
-            config,
-            "max_single_trade_daily_risk_pct",
-            100.0,
+                    "max_single_trade_daily_risk_pct":
+                        100.0,
+                }
+            }
         )
 
         result = allocator.allocate(
@@ -743,36 +998,32 @@ def run_test():
                 "confidence_scaling_enabled"
             ],
             False,
-            "Allocator did not disable "
-            "confidence scaling",
+            "Allocator did not dynamically "
+            "disable confidence scaling",
         )
 
         assert_close(
             result["confidence_multiplier"],
             1.0,
-            "Scaling OFF should force "
+            "Scaling OFF must force "
             "multiplier to 1.0",
         )
-
-        # ₹30,000 / 3 = ₹10,000
-        #
-        # Score 97 must NOT increase risk.
 
         assert_close(
             result["approved_risk_rupees"],
             10000.0,
-            "Exceptional score changed risk "
-            "while scaling was disabled",
+            "97 score must not increase risk "
+            "when scaling is OFF",
         )
 
         print(
-            "✅ PASS — User can disable confidence "
-            "scaling from configuration"
+            "✅ PASS — Confidence scaling can "
+            "be disabled dynamically"
         )
 
         # ====================================================
         # TEST 8
-        # DAILY RISK REMAINS ABSOLUTE CEILING
+        # DAILY RISK ABSOLUTE CEILING
         # ====================================================
 
         subheading(
@@ -780,26 +1031,22 @@ def run_test():
             "ABSOLUTE CEILING"
         )
 
-        update_risk_budget(
-            config,
-            "confidence_scaling_enabled",
-            True,
-        )
+        config.update_many(
+            {
+                "risk_budget": {
+                    "confidence_scaling_enabled":
+                        True,
 
-        update_risk_budget(
-            config,
-            "max_single_trade_daily_risk_pct",
-            100.0,
+                    "max_single_trade_daily_risk_pct":
+                        100.0,
+                }
+            }
         )
 
         result = allocator.allocate(
             daily_risk_budget_rupees=50000,
-
-            # Only ₹6,000 remains.
             remaining_daily_risk_rupees=6000,
-
             trades_taken_today=2,
-
             setup_score=100,
         )
 
@@ -820,24 +1067,37 @@ def run_test():
             result["approved_risk_rupees"],
         )
 
+        assert_close(
+            result["confidence_multiplier"],
+            1.25,
+            "100 score should use exceptional "
+            "multiplier",
+        )
+
         assert_true(
             result["approved_risk_rupees"]
-            <= 6000.0,
-            "Dynamic configuration allowed risk "
-            "beyond remaining daily budget",
+            <= result[
+                "remaining_daily_risk_rupees"
+            ],
+            "Approved risk exceeded remaining "
+            "daily risk",
         )
 
         assert_close(
             result["approved_risk_rupees"],
             6000.0,
-            "Remaining daily risk should be "
-            "the absolute ceiling",
+            "Remaining ₹6,000 must remain "
+            "absolute risk ceiling",
         )
 
         print(
             "✅ PASS — Dynamic intelligence cannot "
-            "create extra daily risk"
+            "create additional daily risk"
         )
+
+        # ====================================================
+        # SUCCESS
+        # ====================================================
 
         heading(
             "✅ ALL DYNAMIC RISK BUDGET "
@@ -845,8 +1105,12 @@ def run_test():
         )
 
         print(
-            "🔒 SAME ALLOCATOR INSTANCE USED "
-            "THROUGHOUT"
+            "🔒 SAME ALLOCATOR INSTANCE USED THROUGHOUT"
+        )
+
+        print(
+            "🔒 TEST CONFIGURATION ISOLATED "
+            "FROM USER CONFIGURATION"
         )
 
         print(
@@ -856,282 +1120,120 @@ def run_test():
     finally:
 
         # ====================================================
-        # RESTORE ORIGINAL CONFIGURATION ATOMICALLY
+        # ALWAYS RESTORE EXACT USER CONFIGURATION
         # ====================================================
-        #
-        # IMPORTANT:
-        #
-        # Risk-budget settings have relationships such as:
-        #
-        # low <= medium <= high <= exceptional
-        #
-        # Therefore related values must be restored together
-        # as ONE atomic configuration transaction.
-        #
-        # This prevents valid final settings from being
-        # rejected because of an invalid temporary state.
 
         heading(
-            "RESTORING ORIGINAL "
+            "RESTORING SAVED USER "
             "RISK BUDGET CONFIGURATION"
         )
 
         try:
 
-            updates = {
-                "risk_budget": {
-                    "allocation_mode":
-                        original_values[
-                            "allocation_mode"
-                        ],
-
-                    "max_trades_per_day":
-                        original_values[
-                            "max_trades_per_day"
-                        ],
-
-                    "confidence_scaling_enabled":
-                        original_values[
-                            "confidence_scaling_enabled"
-                        ],
-
-                    "minimum_setup_score":
-                        original_values[
-                            "minimum_setup_score"
-                        ],
-
-                    "max_single_trade_daily_risk_pct":
-                        original_values[
-                            "max_single_trade_daily_risk_pct"
-                        ],
-
-                    "intelligent_reference_trades":
-                        original_values[
-                            "intelligent_reference_trades"
-                        ],
-
-                    "confidence_multiplier_low":
-                        original_values[
-                            "confidence_multiplier_low"
-                        ],
-
-                    "confidence_multiplier_medium":
-                        original_values[
-                            "confidence_multiplier_medium"
-                        ],
-
-                    "confidence_multiplier_high":
-                        original_values[
-                            "confidence_multiplier_high"
-                        ],
-
-                    "confidence_multiplier_exceptional":
-                        original_values[
-                            "confidence_multiplier_exceptional"
-                        ],
-                }
-            }
-
-            # ------------------------------------------------
-            # ATOMIC RESTORE
-            # ------------------------------------------------
-
-            config.update_many(
-                updates
+            apply_risk_budget_config(
+                config,
+                original_values,
             )
 
-            # ------------------------------------------------
-            # REFRESH SAME RUNNING ALLOCATOR
-            # ------------------------------------------------
+            restored_config = (
+                capture_risk_budget_config(
+                    config
+                )
+            )
 
-            allocator.refresh_config()
+            verify_config(
+                restored_config,
+                original_values,
+            )
 
-            restored = allocator.get_active_config(
-                refresh=False
+            if allocator is not None:
+                allocator.refresh_config()
+
+            final_version = config.get_setting(
+                "system",
+                "config_version",
             )
 
             print()
             print(
                 "Restored Allocation Mode:",
-                restored[
+                restored_config[
                     "allocation_mode"
                 ],
             )
 
             print(
                 "Restored Max Trades     :",
-                restored[
+                restored_config[
                     "max_trades_per_day"
                 ],
             )
 
             print(
                 "Restored Scaling        :",
-                restored[
+                restored_config[
                     "confidence_scaling_enabled"
                 ],
             )
 
             print(
                 "Restored Min Score      :",
-                restored[
+                restored_config[
                     "minimum_setup_score"
                 ],
             )
 
             print(
                 "Restored Single Cap %   :",
-                restored[
+                restored_config[
                     "max_single_trade_daily_risk_pct"
                 ],
             )
 
             print(
                 "Restored Reference      :",
-                restored[
+                restored_config[
                     "intelligent_reference_trades"
                 ],
             )
 
             print(
                 "Restored Low Mult.      :",
-                restored[
+                restored_config[
                     "confidence_multiplier_low"
                 ],
             )
 
             print(
                 "Restored Medium Mult.   :",
-                restored[
+                restored_config[
                     "confidence_multiplier_medium"
                 ],
             )
 
             print(
                 "Restored High Mult.     :",
-                restored[
+                restored_config[
                     "confidence_multiplier_high"
                 ],
             )
 
             print(
                 "Restored Exceptional    :",
-                restored[
+                restored_config[
                     "confidence_multiplier_exceptional"
                 ],
             )
 
             print(
                 "Final Config Version    :",
-                restored[
-                    "config_version"
-                ],
-            )
-
-            # =================================================
-            # VERIFY RESTORATION
-            # =================================================
-
-            assert_equal(
-                restored["allocation_mode"],
-                original_values[
-                    "allocation_mode"
-                ],
-                "Allocation mode was not restored",
-            )
-
-            assert_equal(
-                restored["max_trades_per_day"],
-                original_values[
-                    "max_trades_per_day"
-                ],
-                "Max trades was not restored",
-            )
-
-            assert_equal(
-                restored[
-                    "confidence_scaling_enabled"
-                ],
-                original_values[
-                    "confidence_scaling_enabled"
-                ],
-                "Confidence scaling was not restored",
-            )
-
-            assert_close(
-                restored[
-                    "minimum_setup_score"
-                ],
-                original_values[
-                    "minimum_setup_score"
-                ],
-                "Minimum setup score was not restored",
-            )
-
-            assert_close(
-                restored[
-                    "max_single_trade_daily_risk_pct"
-                ],
-                original_values[
-                    "max_single_trade_daily_risk_pct"
-                ],
-                "Single-trade cap was not restored",
-            )
-
-            assert_equal(
-                restored[
-                    "intelligent_reference_trades"
-                ],
-                original_values[
-                    "intelligent_reference_trades"
-                ],
-                "Reference trades were not restored",
-            )
-
-            assert_close(
-                restored[
-                    "confidence_multiplier_low"
-                ],
-                original_values[
-                    "confidence_multiplier_low"
-                ],
-                "Low multiplier was not restored",
-            )
-
-            assert_close(
-                restored[
-                    "confidence_multiplier_medium"
-                ],
-                original_values[
-                    "confidence_multiplier_medium"
-                ],
-                "Medium multiplier was not restored",
-            )
-
-            assert_close(
-                restored[
-                    "confidence_multiplier_high"
-                ],
-                original_values[
-                    "confidence_multiplier_high"
-                ],
-                "High multiplier was not restored",
-            )
-
-            assert_close(
-                restored[
-                    "confidence_multiplier_exceptional"
-                ],
-                original_values[
-                    "confidence_multiplier_exceptional"
-                ],
-                "Exceptional multiplier was not restored",
+                final_version,
             )
 
             print()
             print(
-                "✅ Original risk budget "
-                "configuration restored atomically"
+                "✅ Exact saved user configuration "
+                "restored atomically"
             )
 
             print(
@@ -1142,7 +1244,8 @@ def run_test():
 
             print()
             print(
-                "❌ CRITICAL — CONFIG RESTORATION FAILED"
+                "❌ CRITICAL — USER CONFIG "
+                "RESTORATION FAILED"
             )
 
             print(
