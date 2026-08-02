@@ -16,3 +16,7 @@ venv/
 
 # VS Code
 .vscode/
+
+.coverage
+htmlcov/
+coverage.xml
