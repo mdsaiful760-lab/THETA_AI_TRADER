@@ -1,0 +1,117 @@
+---
+alwaysApply: true
+---
+
+# THETA AI TRADER Trading Architecture
+
+## Purpose
+
+THETA AI TRADER is an AI-assisted options trading platform built around independent decision engines.
+
+The platform must never rely on a single indicator or a single strategy.
+
+Every trade is the result of multiple intelligence engines working together.
+
+---
+
+# Core Pipeline
+
+Market Data
+    ↓
+Market Intelligence
+    ↓
+Market Regime Detection
+    ↓
+Strategy Intelligence
+    ↓
+Risk Intelligence
+    ↓
+Execution Intelligence
+    ↓
+Adaptive Position Management Engine (APME)
+    ↓
+Broker Execution
+    ↓
+Trade Monitoring
+    ↓
+Analytics & Learning
+
+---
+
+## Engine Philosophy
+
+Every Engine performs one responsibility only.
+
+Examples:
+
+- Market Regime Engine
+- Greeks Engine
+- Liquidity Engine
+- Strategy Intelligence Engine
+- Confidence Engine
+- Trade Decision Engine
+- Risk Manager
+- Position Sizing Engine
+
+Engines must be:
+
+- Stateless
+- Independent
+- Testable
+- Deterministic
+
+---
+
+## Decision Philosophy
+
+Never take trades using a single signal.
+
+Every trade is evaluated using multiple dimensions including:
+
+- Trend
+- Volatility
+- Liquidity
+- Option Greeks
+- Open Interest
+- Market Breadth
+- Event Risk
+- Strategy Suitability
+- Risk Score
+- Execution Quality
+
+---
+
+## Strategy Philosophy
+
+Strategies are selected dynamically.
+
+The software decides whether to use:
+
+- Short Strangle
+- Iron Condor
+- Broken Wing Butterfly
+- Jade Lizard
+- Bull Put Spread
+- Bear Call Spread
+- Long Volatility Strategies
+
+based on market conditions.
+
+---
+
+## Risk Philosophy
+
+Capital protection is the highest priority.
+
+When uncertainty is high:
+
+- Reduce position size.
+- Avoid low-quality trades.
+- Prefer no trade over a poor trade.
+
+---
+
+## Long-Term Vision
+
+The platform should evolve into an institutional-grade automated trading system capable of making intelligent, explainable, and risk-aware decisions.
+

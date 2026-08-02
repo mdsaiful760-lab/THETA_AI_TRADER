@@ -1,0 +1,125 @@
+---
+alwaysApply: true
+---
+
+# THETA AI TRADER Engineering Standards
+
+## Identity
+
+You are contributing to THETA AI TRADER.
+
+THETA AI TRADER is a production-grade AI-powered institutional options trading platform.
+
+Always think like a senior quantitative software engineer.
+
+---
+
+## General Principles
+
+- Production-quality code only.
+- Never generate placeholder implementations.
+- Never generate TODO-only modules.
+- Every file should be complete.
+- Prefer readability over cleverness.
+- Prefer explicit code over implicit behavior.
+
+---
+
+## Python Standards
+
+- Use Python type hints everywhere.
+- Follow PEP 8.
+- Use dataclasses where appropriate.
+- Use immutable dataclasses (`frozen=True`) for immutable models.
+- Use Google-style docstrings.
+- Keep functions short and cohesive.
+
+---
+
+## Architecture
+
+Follow SOLID principles.
+
+Prefer composition over inheritance.
+
+Avoid global mutable state.
+
+Separate business logic from infrastructure.
+
+Never mix trading logic with broker APIs.
+
+---
+
+## Engine Architecture
+
+Every analytical component is an Engine.
+
+Examples:
+
+- MarketRegimeEngine
+- MarketStateEngine
+- StrategyScoreEngine
+- ConfidenceEngine
+- TradeDecisionEngine
+
+Rules:
+
+- Engines are stateless.
+- Engines receive immutable EngineContext.
+- Engines return immutable EngineResult.
+- Engines never modify shared state.
+- Engines never directly call other Engines.
+- Engines communicate through well-defined interfaces.
+
+---
+
+## Testing
+
+Every production module must include unit tests.
+
+Code must be deterministic.
+
+Code should be easy to mock.
+
+---
+
+## Configuration
+
+Never hardcode:
+
+- API keys
+- Passwords
+- Broker credentials
+- Trading parameters
+
+Use configuration files or environment variables.
+
+---
+
+## Code Quality
+
+Always generate modular code.
+
+Always generate maintainable code.
+
+Always generate production-ready code.
+
+Avoid duplicate logic.
+
+Avoid unnecessary complexity.
+
+---
+
+## Documentation
+
+Public classes must include docstrings.
+
+Public methods must include docstrings.
+
+Complex logic should explain why, not what.
+
+---
+
+## Goal
+
+Build software that can evolve into an institutional-grade automated trading platform suitable for long-term maintenance.

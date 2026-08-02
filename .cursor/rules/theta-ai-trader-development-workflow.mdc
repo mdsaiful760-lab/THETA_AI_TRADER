@@ -1,0 +1,44 @@
+---
+alwaysApply: true
+---
+
+# THETA AI TRADER Development Workflow
+
+## Development Principles
+
+- Every feature must be production-ready.
+- Avoid prototype code in production modules.
+- Prefer complete implementations over partial scaffolding.
+- Keep changes small, focused, and testable.
+
+## Git Workflow
+
+- Make atomic commits with meaningful commit messages.
+- Do not commit secrets or `.env` files.
+- Keep the main branch stable.
+
+## Testing
+
+- Every production module should have corresponding unit tests.
+- Test edge cases and failure scenarios.
+- Prefer deterministic tests.
+
+## Documentation
+
+- Public classes and functions require docstrings.
+- Update CHANGELOG.md when introducing meaningful features.
+- Keep architecture documents in sync with implementation.
+
+## Code Review
+
+Before considering a module complete, verify:
+- Correctness
+- Readability
+- Maintainability
+- Performance where appropriate
+- Test coverage
+
+## Project Goal
+
+Build THETA AI TRADER as a maintainable, scalable, institutional-grade automated trading platform that can evolve over many years.
+
