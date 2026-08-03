@@ -32,6 +32,17 @@ from market_data.market_snapshot import (
     SnapshotValidationStatus,
     validate_market_snapshot,
 )
+from strategy.signals import (
+    ConfidenceBand,
+    SignalAction,
+    SignalConfidence,
+    SignalDirection,
+    StrategyExecutionMode,
+    StrategyFamily,
+    TradingSignal,
+    confidence_band_for_score,
+    market_context_from_snapshot,
+)
 
 STRATEGY_VERSION: Final[str] = "1.0.0"
 
@@ -81,62 +92,11 @@ class StrategySignalError(Exception):
         self.field = field
 
 
-class StrategyExecutionMode(str, Enum):
-    """Controls strictness of snapshot and signal gating for a strategy run."""
-
-    LIVE = "live"
-    ANALYSIS = "analysis"
-    BACKTEST = "backtest"
-
-
-class StrategyFamily(str, Enum):
-    """Canonical strategy family identifiers."""
-
-    SHORT_STRANGLE = "short_strangle"
-    IRON_CONDOR = "iron_condor"
-    BULL_PUT_SPREAD = "bull_put_spread"
-    BEAR_CALL_SPREAD = "bear_call_spread"
-    BROKEN_WING_BUTTERFLY = "broken_wing_butterfly"
-    JADE_LIZARD = "jade_lizard"
-    LONG_VOLATILITY = "long_volatility"
-    CUSTOM = "custom"
-    NO_STRATEGY = "no_strategy"
-
-
 class StrategyRiskProfileHint(str, Enum):
     """Informational risk profile hint — not risk enforcement."""
 
     DEFINED = "defined"
     UNDEFINED = "undefined"
-
-
-class SignalAction(str, Enum):
-    """High-level trading signal intent."""
-
-    EVALUATE = "evaluate"
-    WAIT = "wait"
-    NO_TRADE = "no_trade"
-    ABSTAIN = "abstain"
-
-
-class SignalDirection(str, Enum):
-    """Directional bias implied by a strategy signal."""
-
-    NEUTRAL = "neutral"
-    BULLISH = "bullish"
-    BEARISH = "bearish"
-    LONG_VOL = "long_vol"
-    SHORT_VOL = "short_vol"
-    UNKNOWN = "unknown"
-
-
-class ConfidenceBand(str, Enum):
-    """Normalized confidence band derived from score."""
-
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    VERY_HIGH = "very_high"
 
 
 @dataclass(frozen=True)
@@ -208,61 +168,6 @@ class StrategyContext:
     execution_mode: StrategyExecutionMode = StrategyExecutionMode.LIVE
     tags: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     prior_signals: tuple[TradingSignal, ...] = ()
-
-
-@dataclass(frozen=True)
-class SignalConfidence:
-    """Explainable confidence score attached to a trading signal.
-
-    Attributes:
-        score: Normalized score in ``0.0..100.0``.
-        band: Derived confidence band.
-        method: Scoring method identifier.
-    """
-
-    score: float
-    band: ConfidenceBand
-    method: str = "strategy_plugin"
-
-
-@dataclass(frozen=True)
-class TradingSignal:
-    """Immutable standardized trading signal produced by a strategy plugin.
-
-    A signal expresses strategy intent only. It is not an order and must not
-    contain broker tokens, quantities, or execution parameters.
-
-    Attributes:
-        signal_id: Unique identifier for this evaluation.
-        strategy_id: Originating plugin identifier.
-        strategy_version: Originating plugin semantic version.
-        strategy_family: Strategy family enum value.
-        action: High-level signal action.
-        direction: Directional bias.
-        confidence: Confidence score object.
-        underlying: Target underlying symbol.
-        snapshot_id: Source snapshot identifier.
-        as_of: Decision timestamp.
-        reasons: Non-empty explainability reasons.
-        expiry: Optional ISO expiry from chain metadata.
-        metadata: Optional immutable extension labels.
-        valid_until: Optional downstream staleness horizon.
-    """
-
-    signal_id: str
-    strategy_id: str
-    strategy_version: str
-    strategy_family: StrategyFamily
-    action: SignalAction
-    direction: SignalDirection
-    confidence: SignalConfidence
-    underlying: str
-    snapshot_id: str
-    as_of: datetime
-    reasons: tuple[str, ...]
-    expiry: str | None = None
-    metadata: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
-    valid_until: datetime | None = None
 
 
 class BaseStrategy(BaseEngine):
@@ -668,8 +573,6 @@ class BaseStrategy(BaseEngine):
             Immutable abstain trading signal.
         """
         abstain_reasons = reasons or ("strategy abstained due to insufficient setup",)
-        underlying = _snapshot_underlying_symbol(context.snapshot)
-        expiry = context.snapshot.option_chain.metadata.expiry
         return TradingSignal(
             signal_id=_deterministic_signal_id(context, self.metadata.strategy_id, action),
             strategy_id=self.metadata.strategy_id,
@@ -682,11 +585,9 @@ class BaseStrategy(BaseEngine):
                 band=confidence_band_for_score(score),
                 method="abstain",
             ),
-            underlying=underlying,
-            snapshot_id=context.snapshot.provenance.snapshot_id,
+            market=market_context_from_snapshot(context.snapshot),
             as_of=context.as_of,
             reasons=abstain_reasons,
-            expiry=expiry,
         )
 
     def _validate_snapshot_for_context(self, context: StrategyContext) -> None:
@@ -843,24 +744,6 @@ def validate_strategy_plugin_config(config: StrategyPluginConfig) -> None:
             f"priority must be within [{_MIN_PRIORITY}, {_MAX_PRIORITY}].",
             code=ERROR_CONFIG_INVALID,
         )
-
-
-def confidence_band_for_score(score: float) -> ConfidenceBand:
-    """Map a confidence score to a confidence band.
-
-    Args:
-        score: Confidence score in ``0.0..100.0``.
-
-    Returns:
-        Derived confidence band.
-    """
-    if score < 40.0:
-        return ConfidenceBand.LOW
-    if score < 60.0:
-        return ConfidenceBand.MEDIUM
-    if score < 80.0:
-        return ConfidenceBand.HIGH
-    return ConfidenceBand.VERY_HIGH
 
 
 def _snapshot_underlying_symbol(snapshot: MarketSnapshot) -> str:

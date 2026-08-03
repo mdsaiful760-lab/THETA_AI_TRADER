@@ -34,23 +34,27 @@ from strategy.base_strategy import (
     ERROR_SIGNAL_SEMANTIC_REJECT,
     STRATEGY_VERSION,
     BaseStrategy,
-    ConfidenceBand,
-    SignalAction,
-    SignalConfidence,
-    SignalDirection,
     StrategyContext,
     StrategyContextError,
     StrategyEngineConfigurationError,
-    StrategyExecutionMode,
-    StrategyFamily,
     StrategyMetadata,
     StrategyPluginConfig,
     StrategyRiskProfileHint,
     StrategySignalError,
-    TradingSignal,
-    confidence_band_for_score,
     validate_strategy_metadata,
     validate_strategy_plugin_config,
+)
+from strategy.signals import (
+    ConfidenceBand,
+    SignalAction,
+    SignalConfidence,
+    SignalDirection,
+    SignalMarketContext,
+    StrategyExecutionMode,
+    StrategyFamily,
+    TradingSignal,
+    confidence_band_for_score,
+    market_context_from_snapshot,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -184,11 +188,9 @@ def build_evaluate_signal(strategy: BaseStrategy, context: StrategyContext) -> T
             band=confidence_band_for_score(score),
             method="echo",
         ),
-        underlying="NIFTY",
-        snapshot_id=context.snapshot.provenance.snapshot_id,
+        market=market_context_from_snapshot(context.snapshot),
         as_of=context.as_of,
         reasons=("setup meets short strangle criteria",),
-        expiry=context.snapshot.option_chain.metadata.expiry,
     )
 
 
@@ -229,8 +231,7 @@ class BadSignalStrategy(BaseStrategy):
                 score=score,
                 band=confidence_band_for_score(score),
             ),
-            underlying="NIFTY",
-            snapshot_id=context.snapshot.provenance.snapshot_id,
+            market=market_context_from_snapshot(context.snapshot),
             as_of=context.as_of,
             reasons=("bad plugin output",),
         )
@@ -690,8 +691,7 @@ class TestValidateTradingSignal:
             action=SignalAction.EVALUATE,
             direction=SignalDirection.UNKNOWN,
             confidence=SignalConfidence(score=score, band=confidence_band_for_score(score)),
-            underlying="NIFTY",
-            snapshot_id=context.snapshot.provenance.snapshot_id,
+            market=market_context_from_snapshot(context.snapshot),
             as_of=context.as_of,
             reasons=("should not evaluate",),
         )
@@ -702,7 +702,11 @@ class TestValidateTradingSignal:
     def test_rejects_wrong_underlying_symbol(self) -> None:
         strategy = EchoEvaluateStrategy(valid_plugin_config())
         context = valid_context()
-        bad = replace(build_evaluate_signal(strategy, context), underlying="BANKNIFTY")
+        base_signal = build_evaluate_signal(strategy, context)
+        bad = replace(
+            base_signal,
+            market=replace(base_signal.market, underlying="BANKNIFTY"),
+        )
         with pytest.raises(StrategySignalError) as exc_info:
             strategy.validate_trading_signal(bad, context)
         assert exc_info.value.field == "underlying"
