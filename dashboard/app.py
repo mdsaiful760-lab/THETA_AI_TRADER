@@ -10,8 +10,8 @@ import streamlit as st
 from dashboard import DASHBOARD_VERSION, default_dashboard_ui_config
 from dashboard.components.error_banner import render_error
 from dashboard.components.sidebar import render_sidebar
-from dashboard.dashboard_facade import DashboardFacade
 from dashboard.facade import DashboardBackendFacade
+from dashboard.live_session_adapter import build_default_presentation_facade
 from dashboard.pages import PAGE_REGISTRY
 from dashboard.session_state import ensure_session_state, get_session_view, set_last_error
 from dashboard.theme import apply_theme, configure_page
@@ -31,14 +31,15 @@ def build_render_context(
     """Build the dashboard render context.
 
     Args:
-        facade: Optional backend facade; defaults to ``DashboardFacade``
-            presentation adapter (offline when no session is injected).
+        facade: Optional backend facade; defaults to
+            ``build_default_presentation_facade()`` which stays offline
+            unless live handles were registered by the host process.
         clock: Injectable clock for tests.
 
     Returns:
         Immutable render context for page modules.
     """
-    backend = facade or DashboardFacade().as_presentation_facade()
+    backend = facade or build_default_presentation_facade()
     config = default_dashboard_ui_config(
         show_demo_banners=not getattr(backend, "is_connected", False)
     )

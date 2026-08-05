@@ -17,6 +17,7 @@ All notable changes to this project will be documented here.
 - Home page market index strip integration via `DashboardFacade` (NIFTY, BANKNIFTY, SENSEX, INDIA VIX) with 1s autorefresh and offline placeholders
 - Strategy Monitor integration via `DashboardFacade` (regime, active strategy, confidence, evaluation time, and four-strategy score table)
 - Paper Trading dashboard integration via `DashboardFacade` (capital KPIs, positions, order counts, 1s autorefresh)
+- Dashboard live integration adapter (`dashboard/live_session_adapter.py`) mapping streaming/websocket/paper/strategy handles into `DashboardFacade` soft-reads while preserving offline default
 
 ### Changed
 - Improved project architecture
