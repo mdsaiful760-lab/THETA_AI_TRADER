@@ -1,0 +1,175 @@
+:root {
+  --theta-bg: #0B0F14;
+  --theta-surface: #121821;
+  --theta-border: #1E2A38;
+  --theta-text: #E8EEF5;
+  --theta-muted: #8B9BB0;
+  --theta-accent: #3D8BFF;
+  --theta-positive: #2ECC71;
+  --theta-negative: #E74C3C;
+  --theta-warning: #F0B429;
+}
+
+.stApp {
+  background-color: var(--theta-bg);
+  color: var(--theta-text);
+}
+
+section[data-testid="stSidebar"] {
+  background-color: var(--theta-surface);
+  border-right: 1px solid var(--theta-border);
+}
+
+.theta-brand {
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--theta-text);
+  margin-bottom: 0.25rem;
+}
+
+.theta-page-title {
+  color: var(--theta-text);
+  font-size: 1.75rem;
+  font-weight: 700;
+  margin-bottom: 0.25rem;
+}
+
+.theta-page-subtitle {
+  color: var(--theta-muted);
+  margin-top: 0;
+  margin-bottom: 1rem;
+}
+
+.theta-kpi-card,
+.theta-index-card,
+.theta-chart-panel {
+  background: var(--theta-surface);
+  border: 1px solid var(--theta-border);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+}
+
+.theta-kpi-label,
+.theta-index-symbol {
+  color: var(--theta-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.theta-kpi-value,
+.theta-index-value {
+  color: var(--theta-text);
+  font-size: 1.35rem;
+  font-weight: 600;
+  margin-top: 0.25rem;
+}
+
+.theta-index-change {
+  color: var(--theta-muted);
+  font-size: 0.85rem;
+  margin-top: 0.15rem;
+}
+
+.theta-index-change-abs,
+.theta-index-change-pct {
+  font-size: 0.85rem;
+}
+
+.theta-change-positive {
+  color: var(--theta-positive);
+}
+
+.theta-change-negative {
+  color: var(--theta-negative);
+}
+
+.theta-change-muted {
+  color: var(--theta-muted);
+}
+
+.theta-index-updated {
+  color: var(--theta-muted);
+  font-size: 0.72rem;
+  margin-top: 0.35rem;
+}
+
+.theta-index-conn {
+  margin-top: 0.45rem;
+}
+
+.theta-chart-panel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.theta-chart-caption {
+  color: var(--theta-muted);
+  text-align: center;
+  font-size: 0.95rem;
+}
+
+.theta-status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.35rem;
+}
+
+.theta-status-label {
+  color: var(--theta-muted);
+  font-size: 0.82rem;
+}
+
+.theta-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--theta-border);
+}
+
+.theta-badge-positive {
+  color: var(--theta-positive);
+  border-color: rgba(46, 204, 113, 0.35);
+}
+
+.theta-badge-negative {
+  color: var(--theta-negative);
+  border-color: rgba(231, 76, 60, 0.35);
+}
+
+.theta-badge-warning {
+  color: var(--theta-warning);
+  border-color: rgba(240, 180, 41, 0.35);
+}
+
+.theta-badge-neutral {
+  color: var(--theta-accent);
+  border-color: rgba(61, 139, 255, 0.35);
+}
+
+div[data-testid="stMetricValue"] {
+  color: var(--theta-text);
+}
+
+.stButton > button {
+  background-color: var(--theta-surface);
+  color: var(--theta-text);
+  border: 1px solid var(--theta-border);
+}
+
+.stButton > button:hover {
+  border-color: var(--theta-accent);
+  color: var(--theta-accent);
+}
+
+.stDataFrame {
+  border: 1px solid var(--theta-border);
+  border-radius: 8px;
+}

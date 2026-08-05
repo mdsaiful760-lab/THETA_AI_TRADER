@@ -29,3 +29,5 @@ typing_extensions==4.16.0
 tzdata==2026.3
 urllib3==2.6.3
 zope.interface==8.0.1
+streamlit>=1.28.0
+plotly>=5.18.0
