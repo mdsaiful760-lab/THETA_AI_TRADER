@@ -151,6 +151,27 @@ def market_regime_cards(view: MarketPageView) -> tuple[KpiCardModel, ...]:
 
 
 @dataclass(frozen=True)
+class StrategyGateView:
+    """Single gate evaluation row for Strategy Monitor display."""
+
+    name: str
+    outcome: str = PLACEHOLDER
+    detail: str = PLACEHOLDER
+
+
+@dataclass(frozen=True)
+class StrategyLegView:
+    """Recommended option leg row for Strategy Monitor display."""
+
+    side: str = PLACEHOLDER
+    option_type: str = PLACEHOLDER
+    strike: str = PLACEHOLDER
+    quantity: str = PLACEHOLDER
+    symbol: str = PLACEHOLDER
+    delta: str = PLACEHOLDER
+
+
+@dataclass(frozen=True)
 class StrategyRowView:
     """Strategy monitor table row."""
 
@@ -165,6 +186,11 @@ class StrategyRowView:
     score: str = PLACEHOLDER
     eligibility: str = PLACEHOLDER
     reason: str = PLACEHOLDER
+    rank: str = PLACEHOLDER
+    recommendation_state: str = PLACEHOLDER
+    detail_summary: str = PLACEHOLDER
+    gates: tuple[StrategyGateView, ...] = ()
+    legs: tuple[StrategyLegView, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -176,6 +202,7 @@ class StrategyMonitorView:
     active_strategy: str = PLACEHOLDER
     confidence_score: str = PLACEHOLDER
     evaluation_time: str = PLACEHOLDER
+    recommendation_banner: str = PLACEHOLDER
     source: str = "offline"
     as_of: str = PLACEHOLDER
 
@@ -195,6 +222,54 @@ def strategy_monitor_kpi_cards(view: StrategyMonitorView) -> tuple[KpiCardModel,
         KpiCardModel("Confidence Score", view.confidence_score),
         KpiCardModel("Strategy Evaluation Time", view.evaluation_time),
     )
+
+
+def selected_strategy_detail_cards(row: StrategyRowView) -> tuple[KpiCardModel, ...]:
+    """Build KPI cards for the selected strategy detail panel.
+
+    Args:
+        row: Selected strategy row from the monitor snapshot.
+
+    Returns:
+        Detail KPI cards for score, status, eligibility, and confidence.
+    """
+    return (
+        KpiCardModel("Score", row.score),
+        KpiCardModel("Status", row.status),
+        KpiCardModel("Eligible / Rejected", row.eligibility),
+        KpiCardModel("Confidence", row.confidence),
+    )
+
+
+def resolve_selected_strategy(
+    view: StrategyMonitorView,
+    *,
+    selected_display_name: str | None = None,
+) -> StrategyRowView | None:
+    """Resolve the selected strategy row for detail panels.
+
+    Args:
+        view: Strategy monitor snapshot.
+        selected_display_name: Optional UI selection override.
+
+    Returns:
+        Matching strategy row, or ``None`` when the snapshot has no rows.
+    """
+    if not view.strategies:
+        return None
+    if selected_display_name:
+        for row in view.strategies:
+            if row.display_name == selected_display_name:
+                return row
+    active = view.active_strategy
+    if active and active != PLACEHOLDER:
+        for row in view.strategies:
+            if row.display_name == active or row.family == active or row.strategy_id == active:
+                return row
+    for row in view.strategies:
+        if row.rank == "1":
+            return row
+    return view.strategies[0]
 
 
 @dataclass(frozen=True)

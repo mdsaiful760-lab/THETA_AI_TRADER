@@ -31,6 +31,8 @@ from dashboard.view_models import (
     RiskPageView,
     RuntimeStateView,
     SettingsPageView,
+    StrategyGateView,
+    StrategyLegView,
     StrategyMonitorView,
     StrategyRowView,
     SystemStatusView,
@@ -150,6 +152,27 @@ class DashboardIntegrationFacadeConfig:
 
 
 @dataclass(frozen=True)
+class FacadeStrategyGate:
+    """Gate evaluation display row (already-computed upstream outcome)."""
+
+    name: str
+    outcome: str = PLACEHOLDER
+    detail: str = PLACEHOLDER
+
+
+@dataclass(frozen=True)
+class FacadeStrategyLeg:
+    """Recommended option leg display row (already-computed upstream)."""
+
+    side: str = PLACEHOLDER
+    option_type: str = PLACEHOLDER
+    strike: str = PLACEHOLDER
+    quantity: str = PLACEHOLDER
+    symbol: str = PLACEHOLDER
+    delta: str = PLACEHOLDER
+
+
+@dataclass(frozen=True)
 class FacadeStrategyRow:
     """Strategy monitor row for facade consumers."""
 
@@ -164,6 +187,11 @@ class FacadeStrategyRow:
     eligibility: str = PLACEHOLDER
     reason: str = PLACEHOLDER
     display_name: str = PLACEHOLDER
+    rank: str = PLACEHOLDER
+    recommendation_state: str = PLACEHOLDER
+    detail_summary: str = PLACEHOLDER
+    gates: tuple[FacadeStrategyGate, ...] = ()
+    legs: tuple[FacadeStrategyLeg, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -287,6 +315,7 @@ class FacadeStrategyStatus:
     active_strategy: str = PLACEHOLDER
     confidence_score: str = PLACEHOLDER
     evaluation_time: str = PLACEHOLDER
+    recommendation_banner: str = PLACEHOLDER
 
 
 @dataclass(frozen=True)
@@ -774,6 +803,325 @@ def _primary_reason(item: object, placeholder: str) -> tuple[str, tuple[str, ...
     return placeholder, ()
 
 
+def _extract_gates(item: object, placeholder: str) -> tuple[FacadeStrategyGate, ...]:
+    """Soft-read already-computed gate outcomes from an upstream strategy row.
+
+    Args:
+        item: Upstream strategy report/row object.
+        placeholder: Display placeholder for missing fields.
+
+    Returns:
+        Immutable gate rows for dashboard display.
+    """
+    raw = (
+        _field(item, "gates", "gate_results", "gate_outcomes", "gate_evaluations")
+        or ()
+    )
+    gates: list[FacadeStrategyGate] = []
+    try:
+        iterable = raw if raw is not None else ()
+        for gate in iterable:
+            if isinstance(gate, str):
+                gates.append(
+                    FacadeStrategyGate(name=gate, outcome=placeholder, detail=placeholder)
+                )
+                continue
+            name = _display_str(
+                _field(gate, "name", "gate_id", "gate", "id", "code"),
+                placeholder,
+            )
+            if name == placeholder:
+                continue
+            gates.append(
+                FacadeStrategyGate(
+                    name=name,
+                    outcome=_display_str(
+                        _field(gate, "outcome", "status", "result", "decision"),
+                        placeholder,
+                    ),
+                    detail=_display_str(
+                        _field(gate, "detail", "message", "reason", "notes"),
+                        placeholder,
+                    ),
+                )
+            )
+    except TypeError:
+        return ()
+    return tuple(gates)
+
+
+def _leg_from_mapping(leg: object, placeholder: str) -> FacadeStrategyLeg | None:
+    """Map one upstream leg-like object to a facade leg row."""
+    side = _display_str(
+        _field(leg, "side", "action", "buy_sell", "transaction_type"),
+        placeholder,
+    )
+    option_type = _display_str(
+        _field(leg, "option_type", "right", "call_put", "type"),
+        placeholder,
+    )
+    strike = _display_str(_field(leg, "strike", "strike_price"), placeholder)
+    quantity = _display_str(
+        _field(leg, "quantity", "qty", "lots", "contracts"),
+        placeholder,
+    )
+    symbol = _display_str(
+        _field(leg, "symbol", "tradingsymbol", "instrument_symbol", "name"),
+        placeholder,
+    )
+    delta = _display_str(_field(leg, "delta"), placeholder)
+    if all(
+        value == placeholder
+        for value in (side, option_type, strike, quantity, symbol, delta)
+    ):
+        return None
+    return FacadeStrategyLeg(
+        side=side,
+        option_type=option_type,
+        strike=strike,
+        quantity=quantity,
+        symbol=symbol,
+        delta=delta,
+    )
+
+
+def _legs_from_selection(selection: object, placeholder: str) -> tuple[FacadeStrategyLeg, ...]:
+    """Derive display legs from a strike-selection object when present."""
+    if selection is None:
+        return ()
+    legs: list[FacadeStrategyLeg] = []
+    call_strike = _field(selection, "call_strike", "short_call_strike", "long_call_strike")
+    put_strike = _field(selection, "put_strike", "short_put_strike", "long_put_strike")
+    if call_strike is not None:
+        legs.append(
+            FacadeStrategyLeg(
+                side=_display_str(_field(selection, "call_side"), "SELL"),
+                option_type="CALL",
+                strike=_display_str(call_strike, placeholder),
+                quantity=_display_str(_field(selection, "quantity", "qty"), "1"),
+                symbol=_display_str(
+                    _field(selection, "call_symbol", "short_call_symbol"),
+                    placeholder,
+                ),
+                delta=_display_str(_field(selection, "call_delta"), placeholder),
+            )
+        )
+    if put_strike is not None:
+        legs.append(
+            FacadeStrategyLeg(
+                side=_display_str(_field(selection, "put_side"), "SELL"),
+                option_type="PUT",
+                strike=_display_str(put_strike, placeholder),
+                quantity=_display_str(_field(selection, "quantity", "qty"), "1"),
+                symbol=_display_str(
+                    _field(selection, "put_symbol", "short_put_symbol"),
+                    placeholder,
+                ),
+                delta=_display_str(_field(selection, "put_delta"), placeholder),
+            )
+        )
+    # Vertical / iron-condor style short+long fields when present.
+    for option_type, side_key, strike_key, symbol_key, delta_key in (
+        ("PUT", "short_put_side", "short_put_strike", "short_put_symbol", "short_put_delta"),
+        ("PUT", "long_put_side", "long_put_strike", "long_put_symbol", "long_put_delta"),
+        ("CALL", "short_call_side", "short_call_strike", "short_call_symbol", "short_call_delta"),
+        ("CALL", "long_call_side", "long_call_strike", "long_call_symbol", "long_call_delta"),
+    ):
+        strike = _field(selection, strike_key)
+        if strike is None:
+            continue
+        # Avoid duplicating the simple call/put pair already mapped above.
+        if strike_key in {"call_strike", "put_strike"}:
+            continue
+        if any(existing.strike == _display_str(strike, placeholder) and existing.option_type == option_type for existing in legs):
+            continue
+        default_side = "SELL" if strike_key.startswith("short_") else "BUY"
+        legs.append(
+            FacadeStrategyLeg(
+                side=_display_str(_field(selection, side_key), default_side),
+                option_type=option_type,
+                strike=_display_str(strike, placeholder),
+                quantity=_display_str(_field(selection, "quantity", "qty"), "1"),
+                symbol=_display_str(_field(selection, symbol_key), placeholder),
+                delta=_display_str(_field(selection, delta_key), placeholder),
+            )
+        )
+    return tuple(legs)
+
+
+def _extract_legs(item: object, placeholder: str) -> tuple[FacadeStrategyLeg, ...]:
+    """Soft-read already-computed recommended option legs from upstream.
+
+    Args:
+        item: Upstream strategy report/row object.
+        placeholder: Display placeholder for missing fields.
+
+    Returns:
+        Immutable option-leg rows for dashboard display.
+    """
+    raw = (
+        _field(
+            item,
+            "legs",
+            "option_legs",
+            "recommended_legs",
+            "selected_legs",
+        )
+        or ()
+    )
+    legs: list[FacadeStrategyLeg] = []
+    try:
+        for leg in raw if raw is not None else ():
+            mapped = _leg_from_mapping(leg, placeholder)
+            if mapped is not None:
+                legs.append(mapped)
+    except TypeError:
+        legs = []
+
+    if legs:
+        return tuple(legs)
+
+    selection = _field(item, "selection", "strike_selection")
+    if selection is None:
+        recommendation = _field(item, "recommendation")
+        if recommendation is not None:
+            selection = _field(recommendation, "selection", "strike_selection")
+            raw_rec_legs = _field(
+                recommendation,
+                "legs",
+                "option_legs",
+                "recommended_legs",
+            )
+            if raw_rec_legs:
+                try:
+                    for leg in raw_rec_legs:
+                        mapped = _leg_from_mapping(leg, placeholder)
+                        if mapped is not None:
+                            legs.append(mapped)
+                except TypeError:
+                    pass
+                if legs:
+                    return tuple(legs)
+    return _legs_from_selection(selection, placeholder)
+
+
+def _recommendation_state(item: object, placeholder: str) -> str:
+    """Soft-read recommendation state label from an upstream row."""
+    return _display_str(
+        _field(
+            item,
+            "recommendation_state",
+            "entry_state",
+            "state",
+            "recommendation_status",
+        ),
+        placeholder,
+    )
+
+
+def _detail_summary(
+    *,
+    display_name: str,
+    score: str,
+    eligibility: str,
+    status: str,
+    reason: str,
+    placeholder: str,
+) -> str:
+    """Compose a display-only summary line for selected strategy details."""
+    parts = [display_name]
+    if score != placeholder:
+        parts.append(f"Score {score}")
+    if eligibility != placeholder:
+        parts.append(eligibility)
+    if status != placeholder:
+        parts.append(status)
+    if reason != placeholder:
+        parts.append(reason)
+    return " · ".join(parts) if len(parts) > 1 else display_name
+
+
+def _assign_presentation_ranks(
+    strategies: list[FacadeStrategyRow],
+    placeholder: str,
+) -> list[FacadeStrategyRow]:
+    """Assign Rank labels by sorting already-computed scores (display only).
+
+    Args:
+        strategies: Strategy rows in canonical family order.
+        placeholder: Placeholder used when score is missing.
+
+    Returns:
+        Same family order with ``rank`` populated for scored rows.
+    """
+    scored: list[tuple[int, float]] = []
+    for index, row in enumerate(strategies):
+        if row.score == placeholder:
+            continue
+        try:
+            scored.append((index, float(row.score)))
+        except (TypeError, ValueError):
+            continue
+    scored.sort(key=lambda item: (-item[1], item[0]))
+    rank_by_index = {index: str(rank) for rank, (index, _) in enumerate(scored, start=1)}
+    return [
+        replace(row, rank=rank_by_index.get(index, placeholder))
+        for index, row in enumerate(strategies)
+    ]
+
+
+def _format_recommendation_banner(
+    *,
+    snap: object | None,
+    active_strategy: str,
+    confidence_score: str,
+    strategies: tuple[FacadeStrategyRow, ...],
+    placeholder: str,
+) -> str:
+    """Build recommendation banner text from already-available facade fields.
+
+    Prefers an explicit upstream banner string. Otherwise composes a display
+    label from the active strategy row — never invents a new recommendation.
+    """
+    if snap is not None:
+        explicit = _display_str(
+            _field(
+                snap,
+                "recommendation_banner",
+                "banner",
+                "banner_text",
+                "recommendation_summary",
+                "headline",
+            ),
+            placeholder,
+        )
+        if explicit != placeholder:
+            return explicit
+
+    if active_strategy == placeholder:
+        return placeholder
+
+    active_row: FacadeStrategyRow | None = None
+    for row in strategies:
+        if row.display_name == active_strategy or row.family == active_strategy:
+            active_row = row
+            break
+
+    parts = [f"Recommended: {active_strategy}"]
+    if active_row is not None:
+        if active_row.eligibility != placeholder:
+            parts.append(active_row.eligibility)
+        if active_row.score != placeholder:
+            parts.append(f"Score {active_row.score}")
+        if active_row.recommendation_state != placeholder:
+            parts.append(active_row.recommendation_state)
+        elif active_row.status != placeholder:
+            parts.append(active_row.status)
+    if confidence_score != placeholder:
+        parts.append(f"Confidence {confidence_score}")
+    return " · ".join(parts)
+
+
 def home_indices_to_quote_views(
     payload: FacadeHomeMarketIndices,
 ) -> tuple[IndexQuoteView, ...]:
@@ -839,6 +1187,11 @@ def empty_strategy_status(
             score=placeholder,
             eligibility=placeholder,
             reason=placeholder,
+            rank=placeholder,
+            recommendation_state=placeholder,
+            detail_summary=display_name,
+            gates=(),
+            legs=(),
         )
         for family_id, display_name in STRATEGY_MONITOR_FAMILIES
     )
@@ -849,6 +1202,7 @@ def empty_strategy_status(
         active_strategy=placeholder,
         confidence_score=placeholder,
         evaluation_time=placeholder,
+        recommendation_banner=placeholder,
     )
 
 
@@ -868,6 +1222,7 @@ def strategy_status_to_monitor_view(
         active_strategy=payload.active_strategy,
         confidence_score=payload.confidence_score,
         evaluation_time=payload.evaluation_time,
+        recommendation_banner=payload.recommendation_banner,
         strategies=tuple(
             StrategyRowView(
                 strategy_id=row.strategy_id,
@@ -885,6 +1240,34 @@ def strategy_status_to_monitor_view(
                 reason=row.reason
                 if row.reason != PLACEHOLDER
                 else (", ".join(row.reasons) if row.reasons else PLACEHOLDER),
+                rank=row.rank,
+                recommendation_state=row.recommendation_state,
+                detail_summary=row.detail_summary
+                if row.detail_summary != PLACEHOLDER
+                else (
+                    row.display_name
+                    if row.display_name != PLACEHOLDER
+                    else row.family
+                ),
+                gates=tuple(
+                    StrategyGateView(
+                        name=gate.name,
+                        outcome=gate.outcome,
+                        detail=gate.detail,
+                    )
+                    for gate in row.gates
+                ),
+                legs=tuple(
+                    StrategyLegView(
+                        side=leg.side,
+                        option_type=leg.option_type,
+                        strike=leg.strike,
+                        quantity=leg.quantity,
+                        symbol=leg.symbol,
+                        delta=leg.delta,
+                    )
+                    for leg in row.legs
+                ),
             )
             for row in payload.strategies
         ),
@@ -1835,6 +2218,11 @@ class DashboardIntegrationFacade:
                         score=ph,
                         eligibility=ph,
                         reason=ph,
+                        rank=ph,
+                        recommendation_state=ph,
+                        detail_summary=display_name,
+                        gates=(),
+                        legs=(),
                     )
                 )
                 continue
@@ -1847,6 +2235,25 @@ class DashboardIntegrationFacade:
             )
             if confidence_raw is None and hasattr(item, "confidence"):
                 confidence_raw = getattr(item, "confidence")
+            score = _format_score(
+                _field(
+                    item,
+                    "score",
+                    "ranking_score",
+                    "suitability_score",
+                ),
+                ph,
+            )
+            eligibility = _format_eligibility(item, ph)
+            status = _display_str(
+                _field(item, "status", "evaluation_status"),
+                ph,
+            )
+            mapped_display = _display_str(
+                _field(item, "display_name"),
+                display_name,
+            )
+            recommendation_state = _recommendation_state(item, ph)
             strategies.append(
                 FacadeStrategyRow(
                     strategy_id=_display_str(
@@ -1854,14 +2261,8 @@ class DashboardIntegrationFacade:
                         family_id,
                     ),
                     family=family_id,
-                    display_name=_display_str(
-                        _field(item, "display_name"),
-                        display_name,
-                    ),
-                    status=_display_str(
-                        _field(item, "status", "evaluation_status"),
-                        ph,
-                    ),
+                    display_name=mapped_display,
+                    status=status,
                     confidence=_format_confidence(confidence_raw, ph),
                     last_signal=_display_str(
                         _field(item, "last_signal", "signal"),
@@ -1877,19 +2278,25 @@ class DashboardIntegrationFacade:
                         ph,
                     ),
                     reasons=reasons,
-                    score=_format_score(
-                        _field(
-                            item,
-                            "score",
-                            "ranking_score",
-                            "suitability_score",
-                        ),
-                        ph,
-                    ),
-                    eligibility=_format_eligibility(item, ph),
+                    score=score,
+                    eligibility=eligibility,
                     reason=reason,
+                    rank=ph,
+                    recommendation_state=recommendation_state,
+                    detail_summary=_detail_summary(
+                        display_name=mapped_display,
+                        score=score,
+                        eligibility=eligibility,
+                        status=status,
+                        reason=reason,
+                        placeholder=ph,
+                    ),
+                    gates=_extract_gates(item, ph),
+                    legs=_extract_legs(item, ph),
                 )
             )
+
+        strategies = _assign_presentation_ranks(strategies, ph)
 
         summary = _attr(snap, "summary")
         active = _display_str(
@@ -1948,18 +2355,31 @@ class DashboardIntegrationFacade:
             )
 
         has_live = any(
-            row.score != ph or row.status != ph or row.eligibility != ph
+            row.score != ph
+            or row.status != ph
+            or row.eligibility != ph
+            or row.gates
+            or row.legs
             for row in strategies
+        )
+        ranked = tuple(strategies)
+        banner = _format_recommendation_banner(
+            snap=snap,
+            active_strategy=active,
+            confidence_score=confidence_score,
+            strategies=ranked,
+            placeholder=ph,
         )
         return FacadeStrategyStatus(
             schema_version=DASHBOARD_FACADE_SCHEMA_VERSION,
             as_of=as_of,
             source="live" if has_live else "offline",
-            strategies=tuple(strategies),
+            strategies=ranked,
             market_regime=market_regime,
             active_strategy=active,
             confidence_score=confidence_score,
             evaluation_time=evaluation_time,
+            recommendation_banner=banner,
         )
 
     def _fetch_paper_positions(self) -> FacadePaperPositions:
