@@ -83,13 +83,33 @@ class RuntimeStateView:
 
 @dataclass(frozen=True)
 class MarketPageView:
-    """Market page snapshot."""
+    """Market page snapshot for the Market dashboard page.
+
+    Attributes:
+        underlyings: Selectable underlying labels.
+        selected_underlying: Currently displayed underlying.
+        ltp: Last traded / index value for the selected underlying.
+        change: Absolute/compact change display.
+        volume: Volume display.
+        market_regime: Current market regime label.
+        connection_status: Aggregate market connection status.
+        last_update: Last update timestamp display.
+        source: Payload source (``live`` / ``offline`` / ``cached``).
+        indices: Live index cards (NIFTY, BANKNIFTY, SENSEX, INDIA VIX).
+        option_chain_columns: Option chain column headers.
+        option_chain_rows: Option chain display rows.
+    """
 
     underlyings: tuple[str, ...] = ()
     selected_underlying: str = PLACEHOLDER
     ltp: str = PLACEHOLDER
     change: str = PLACEHOLDER
     volume: str = PLACEHOLDER
+    market_regime: str = PLACEHOLDER
+    connection_status: str = "OFFLINE"
+    last_update: str = PLACEHOLDER
+    source: str = "offline"
+    indices: tuple[IndexQuoteView, ...] = ()
     option_chain_columns: tuple[str, ...] = (
         "strike",
         "type",
@@ -98,6 +118,36 @@ class MarketPageView:
         "iv",
     )
     option_chain_rows: tuple[tuple[str, ...], ...] = ()
+
+
+def market_page_statistic_cards(view: MarketPageView) -> tuple[KpiCardModel, ...]:
+    """Build Market Statistics KPI cards.
+
+    Args:
+        view: Market page snapshot.
+
+    Returns:
+        Five statistic KPI cards in display order.
+    """
+    return (
+        KpiCardModel("LTP", view.ltp),
+        KpiCardModel("Change", view.change),
+        KpiCardModel("Volume", view.volume),
+        KpiCardModel("Connection", view.connection_status),
+        KpiCardModel("Last Update", view.last_update),
+    )
+
+
+def market_regime_cards(view: MarketPageView) -> tuple[KpiCardModel, ...]:
+    """Build the Market Regime KPI card row.
+
+    Args:
+        view: Market page snapshot.
+
+    Returns:
+        Single-item KPI tuple for market regime.
+    """
+    return (KpiCardModel("Market Regime", view.market_regime),)
 
 
 @dataclass(frozen=True)

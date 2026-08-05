@@ -18,6 +18,7 @@ All notable changes to this project will be documented here.
 - Strategy Monitor integration via `DashboardFacade` (regime, active strategy, confidence, evaluation time, and four-strategy score table)
 - Paper Trading dashboard integration via `DashboardFacade` (capital KPIs, positions, order counts, 1s autorefresh)
 - Dashboard live integration adapter (`dashboard/live_session_adapter.py`) mapping streaming/websocket/paper/strategy handles into `DashboardFacade` soft-reads while preserving offline default
+- Market page integration via `DashboardFacade` (live index cards, regime, statistics, snapshot, TradingView placeholder)
 
 ### Changed
 - Improved project architecture

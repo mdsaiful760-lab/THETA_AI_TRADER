@@ -488,13 +488,69 @@ def empty_market_snapshot(
     ts = as_of or _utc_now()
     return FacadeMarketSnapshot(
         **_meta(as_of=ts, source="offline"),
-        underlyings=(),
-        selected_underlying=placeholder,
+        underlyings=HOME_MARKET_INDEX_SYMBOLS,
+        selected_underlying="NIFTY",
         ltp=placeholder,
         change=placeholder,
         volume=placeholder,
         option_chain_columns=("strike", "type", "ltp", "oi", "iv"),
         option_chain_rows=(),
+    )
+
+
+def _market_connection_status(indices: tuple[IndexQuoteView, ...], *, connected: bool) -> str:
+    """Derive an aggregate connection label from index cards."""
+    if not indices:
+        return "OFFLINE" if not connected else "UNKNOWN"
+    statuses = {quote.connection_status.upper() for quote in indices}
+    if "LIVE" in statuses:
+        return "LIVE"
+    if "DELAYED" in statuses:
+        return "DELAYED"
+    if statuses == {"OFFLINE"} or not connected:
+        return "OFFLINE"
+    return "UNKNOWN"
+
+
+def market_snapshot_to_page_view(
+    snap: FacadeMarketSnapshot,
+    *,
+    indices: tuple[IndexQuoteView, ...],
+    market_regime: str,
+    connected: bool,
+) -> MarketPageView:
+    """Compose presentation ``MarketPageView`` from facade market DTOs.
+
+    Args:
+        snap: Facade market snapshot.
+        indices: Home/market index quote views.
+        market_regime: Regime label from strategy/regime soft-reads.
+        connected: Whether the facade reports connected.
+
+    Returns:
+        Enriched market page view for Streamlit rendering.
+    """
+    last_update = PLACEHOLDER
+    for quote in indices:
+        if quote.last_update and quote.last_update != PLACEHOLDER:
+            last_update = quote.last_update
+            break
+    if last_update == PLACEHOLDER and isinstance(snap.as_of, datetime):
+        last_update = snap.as_of.strftime("%Y-%m-%d %H:%M:%S UTC")
+    underlyings = snap.underlyings or HOME_MARKET_INDEX_SYMBOLS
+    return MarketPageView(
+        underlyings=underlyings,
+        selected_underlying=snap.selected_underlying or "NIFTY",
+        ltp=snap.ltp,
+        change=snap.change,
+        volume=snap.volume,
+        market_regime=market_regime,
+        connection_status=_market_connection_status(indices, connected=connected),
+        last_update=last_update,
+        source=snap.source,
+        indices=indices,
+        option_chain_columns=snap.option_chain_columns,
+        option_chain_rows=snap.option_chain_rows,
     )
 
 
@@ -2429,16 +2485,15 @@ class PresentationFacadeAdapter:
         return self._facade.get_home_market_indices()
 
     def get_market_snapshot(self) -> MarketPageView:
-        """Map market facade DTO to presentation view."""
+        """Compose Market page view from market, indices, and regime reads."""
         snap = self._facade.get_market_snapshot()
-        return MarketPageView(
-            underlyings=snap.underlyings,
-            selected_underlying=snap.selected_underlying,
-            ltp=snap.ltp,
-            change=snap.change,
-            volume=snap.volume,
-            option_chain_columns=snap.option_chain_columns,
-            option_chain_rows=snap.option_chain_rows,
+        indices = home_indices_to_quote_views(self._facade.get_home_market_indices())
+        strategy = self._facade.get_strategy_status()
+        return market_snapshot_to_page_view(
+            snap,
+            indices=indices,
+            market_regime=strategy.market_regime,
+            connected=self._facade.is_connected,
         )
 
     def get_strategy_monitor(self) -> StrategyMonitorView:

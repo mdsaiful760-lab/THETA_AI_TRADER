@@ -151,9 +151,27 @@ class NullIntegrationFacade:
             )
 
     def get_market_snapshot(self) -> MarketPageView:
-        """Return empty market snapshot."""
+        """Return offline Market page placeholders including index cards."""
+        from dashboard.dashboard_facade import (
+            empty_home_market_indices,
+            empty_market_snapshot,
+            home_indices_to_quote_views,
+            market_snapshot_to_page_view,
+        )
+        from dashboard.view_models import PLACEHOLDER
+
         with self._lock:
-            return MarketPageView()
+            return market_snapshot_to_page_view(
+                empty_market_snapshot(),
+                indices=home_indices_to_quote_views(
+                    empty_home_market_indices(
+                        facade_connected=False,
+                        connection_status="OFFLINE",
+                    )
+                ),
+                market_regime=PLACEHOLDER,
+                connected=False,
+            )
 
     def get_strategy_monitor(self) -> StrategyMonitorView:
         """Return offline Strategy Monitor placeholders for the four families."""
