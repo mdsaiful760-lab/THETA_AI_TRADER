@@ -216,6 +216,8 @@ class FacadeOrderRow:
     side: str
     quantity: str
     timestamp: str
+    strategy: str = PLACEHOLDER
+    price: str = PLACEHOLDER
 
 
 @dataclass(frozen=True)
@@ -384,6 +386,16 @@ class FacadeOrderBook:
     as_of: datetime
     source: str
     orders: tuple[FacadeOrderRow, ...]
+    total_orders: str = "0"
+    orders_pending: str = "0"
+    orders_filled: str = "0"
+    orders_cancelled: str = "0"
+    orders_rejected: str = "0"
+    broker_connection_status: str = "DISCONNECTED"
+    oms_status: str = "UNKNOWN"
+    exchange_status: str = "UNKNOWN"
+    last_order_time: str = PLACEHOLDER
+    broker_latency: str = PLACEHOLDER
 
 
 @dataclass(frozen=True)
@@ -1550,12 +1562,26 @@ def paper_ledger_to_page_view(
     )
 
 
-def empty_order_book(*, as_of: datetime | None = None) -> FacadeOrderBook:
+def empty_order_book(
+    *,
+    as_of: datetime | None = None,
+    placeholder: str = PLACEHOLDER,
+) -> FacadeOrderBook:
     """Return empty order book snapshot."""
     ts = as_of or _utc_now()
     return FacadeOrderBook(
         **_meta(as_of=ts, source="offline"),
         orders=(),
+        total_orders="0",
+        orders_pending="0",
+        orders_filled="0",
+        orders_cancelled="0",
+        orders_rejected="0",
+        broker_connection_status="DISCONNECTED",
+        oms_status="UNKNOWN",
+        exchange_status="UNKNOWN",
+        last_order_time=placeholder,
+        broker_latency=placeholder,
     )
 
 
@@ -2796,12 +2822,12 @@ class DashboardIntegrationFacade:
         """Build order book from optional upstream accessor."""
         ph = self._config.placeholder
         if self._session is None:
-            return empty_order_book(as_of=self._clock())
+            return empty_order_book(as_of=self._clock(), placeholder=ph)
         snap = self._call_optional("get_order_book") or self._call_optional(
             "get_orders_snapshot"
         )
         if snap is None:
-            return empty_order_book(as_of=self._clock())
+            return empty_order_book(as_of=self._clock(), placeholder=ph)
         orders_raw = _attr(snap, "orders") or ()
         rows: list[FacadeOrderRow] = []
         for item in orders_raw if orders_raw is not None else ():
@@ -2814,13 +2840,65 @@ class DashboardIntegrationFacade:
                     side=_display_str(_attr(item, "side"), ph),
                     quantity=_display_str(_attr(item, "quantity"), ph),
                     timestamp=_display_str(_attr(item, "timestamp"), ph),
+                    strategy=_display_str(
+                        _field(item, "strategy", "strategy_id"), ph
+                    ),
+                    price=_format_money(
+                        _field(item, "price", "avg_price", "limit_price", "fill_price"),
+                        ph,
+                    ),
                 )
             )
+        orders = tuple(rows)
+        filled, pending, cancelled, rejected = _count_order_buckets(orders)
+        total_orders = str(len(orders))
+
+        last_order_time = ph
+        if orders:
+            newest = orders[0].timestamp
+            if newest and newest != ph:
+                last_order_time = newest
+
+        broker_connection_status = _state_display(
+            _field(snap, "broker_connection_status", "broker_status", "connected"),
+            true_label="CONNECTED",
+            false_label="DISCONNECTED",
+            default="UNKNOWN",
+        )
+        oms_status = _display_str(
+            _field(snap, "oms_status", "order_management_status"), "UNKNOWN"
+        )
+        exchange_status = _display_str(
+            _field(snap, "exchange_status", "market_status"), "UNKNOWN"
+        )
+        broker_latency = _format_latency(_field(snap, "latency_ms", "latency"), ph)
+
+        if broker_connection_status == "UNKNOWN" or exchange_status == "UNKNOWN":
+            try:
+                system_status = self.get_system_status()
+            except Exception:  # noqa: BLE001 - optional soft-read
+                system_status = None
+            if system_status is not None:
+                if broker_connection_status == "UNKNOWN":
+                    broker_connection_status = system_status.broker_status
+                if exchange_status == "UNKNOWN":
+                    exchange_status = system_status.market_status
+
         return FacadeOrderBook(
             schema_version=DASHBOARD_FACADE_SCHEMA_VERSION,
             as_of=self._clock(),
-            source="live",
-            orders=tuple(rows),
+            source="live" if orders else "offline",
+            orders=orders,
+            total_orders=total_orders,
+            orders_pending=pending,
+            orders_filled=filled,
+            orders_cancelled=cancelled,
+            orders_rejected=rejected,
+            broker_connection_status=broker_connection_status,
+            oms_status=oms_status,
+            exchange_status=exchange_status,
+            last_order_time=last_order_time,
+            broker_latency=broker_latency,
         )
 
     def _fetch_portfolio(self) -> FacadePortfolio:
@@ -3084,9 +3162,22 @@ class PresentationFacadeAdapter:
                     side=row.side,
                     quantity=row.quantity,
                     timestamp=row.timestamp,
+                    strategy=row.strategy,
+                    price=row.price,
                 )
                 for row in snap.orders
-            )
+            ),
+            total_orders=snap.total_orders,
+            orders_pending=snap.orders_pending,
+            orders_filled=snap.orders_filled,
+            orders_cancelled=snap.orders_cancelled,
+            orders_rejected=snap.orders_rejected,
+            broker_connection_status=snap.broker_connection_status,
+            oms_status=snap.oms_status,
+            exchange_status=snap.exchange_status,
+            last_order_time=snap.last_order_time,
+            broker_latency=snap.broker_latency,
+            source=snap.source,
         )
 
     def get_portfolio(self) -> PortfolioPageView:

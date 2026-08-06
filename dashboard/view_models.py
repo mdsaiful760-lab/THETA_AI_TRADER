@@ -408,6 +408,8 @@ class OrderRowView:
     side: str = PLACEHOLDER
     quantity: str = PLACEHOLDER
     timestamp: str = PLACEHOLDER
+    strategy: str = PLACEHOLDER
+    price: str = PLACEHOLDER
 
 
 @dataclass(frozen=True)
@@ -415,6 +417,80 @@ class OrdersPageView:
     """Orders page snapshot."""
 
     orders: tuple[OrderRowView, ...] = ()
+    total_orders: str = "0"
+    orders_pending: str = "0"
+    orders_filled: str = "0"
+    orders_cancelled: str = "0"
+    orders_rejected: str = "0"
+    broker_connection_status: str = "DISCONNECTED"
+    oms_status: str = "UNKNOWN"
+    exchange_status: str = "UNKNOWN"
+    last_order_time: str = PLACEHOLDER
+    broker_latency: str = PLACEHOLDER
+    source: str = "offline"
+
+
+def orders_summary_kpi_cards(view: OrdersPageView) -> tuple[KpiCardModel, ...]:
+    """Build Order Summary KPI cards.
+
+    Args:
+        view: Orders page snapshot.
+
+    Returns:
+        Total Orders, Pending, Filled, Cancelled, Rejected cards.
+    """
+    return (
+        KpiCardModel("Total Orders", view.total_orders),
+        KpiCardModel("Pending", view.orders_pending),
+        KpiCardModel("Filled", view.orders_filled),
+        KpiCardModel("Cancelled", view.orders_cancelled),
+        KpiCardModel("Rejected", view.orders_rejected),
+    )
+
+
+def orders_broker_status_cards(view: OrdersPageView) -> tuple[KpiCardModel, ...]:
+    """Build Broker Status KPI cards.
+
+    Args:
+        view: Orders page snapshot.
+
+    Returns:
+        Broker Connection, OMS Status, Exchange Status, Last Order Time, and
+        Latency cards.
+    """
+    return (
+        KpiCardModel("Broker Connection", view.broker_connection_status),
+        KpiCardModel("OMS Status", view.oms_status),
+        KpiCardModel("Exchange Status", view.exchange_status),
+        KpiCardModel("Last Order Time", view.last_order_time),
+        KpiCardModel("Latency", view.broker_latency),
+    )
+
+
+def orders_status_distribution(view: OrdersPageView) -> tuple[tuple[str, float], ...]:
+    """Build the Order Status Distribution series from already-computed counts.
+
+    Never recounts orders; reuses the same counts shown on the summary KPI row.
+
+    Args:
+        view: Orders page snapshot.
+
+    Returns:
+        ``(label, count)`` pairs for Pending, Filled, Cancelled, and Rejected.
+    """
+
+    def _count(value: str) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return (
+        ("Pending", _count(view.orders_pending)),
+        ("Filled", _count(view.orders_filled)),
+        ("Cancelled", _count(view.orders_cancelled)),
+        ("Rejected", _count(view.orders_rejected)),
+    )
 
 
 @dataclass(frozen=True)
