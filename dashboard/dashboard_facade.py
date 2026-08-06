@@ -365,6 +365,15 @@ class FacadePaperTradingLedger:
     orders_rejected: str
     orders: tuple[FacadeOrderRow, ...] = ()
     equity_series: tuple[tuple[str, float], ...] = ()
+    drawdown_series: tuple[tuple[str, float], ...] = ()
+    total_pnl: str = PLACEHOLDER
+    exposure: str = PLACEHOLDER
+    open_positions_count: str = "0"
+    closed_positions_count: str = "0"
+    runner_state: str = "UNKNOWN"
+    runner_connection_status: str = "UNKNOWN"
+    runner_latency: str = PLACEHOLDER
+    runner_last_update: str = PLACEHOLDER
 
 
 @dataclass(frozen=True)
@@ -1327,6 +1336,15 @@ def empty_paper_trading_ledger(
         orders_rejected="0",
         orders=(),
         equity_series=(),
+        drawdown_series=(),
+        total_pnl=placeholder,
+        exposure=placeholder,
+        open_positions_count="0",
+        closed_positions_count="0",
+        runner_state="STOPPED",
+        runner_connection_status="DISCONNECTED",
+        runner_latency=placeholder,
+        runner_last_update=placeholder,
     )
 
 
@@ -1371,6 +1389,69 @@ def _compose_total_equity(
     if cash_n is None or unrealized_n is None:
         return placeholder
     return _format_money(cash_n + unrealized_n, placeholder)
+
+
+def _compose_total_pnl(
+    realized: object | None,
+    unrealized: object | None,
+    placeholder: str,
+) -> str:
+    """Compose total PnL display from realized + unrealized when both numeric.
+
+    Display-only aggregation of already-computed accounting fields.
+    """
+    realized_n = _parse_float(realized)
+    unrealized_n = _parse_float(unrealized)
+    if realized_n is None or unrealized_n is None:
+        return placeholder
+    return _format_money(realized_n + unrealized_n, placeholder)
+
+
+def _count_display(value: object | None) -> str:
+    """Format a count-like value (sized collection or number) for display."""
+    if value is None:
+        return "0"
+    if isinstance(value, (list, tuple, set)):
+        return str(len(value))
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return _display_str(value, "0")
+
+
+def _state_display(
+    raw: object | None,
+    *,
+    true_label: str,
+    false_label: str,
+    default: str,
+) -> str:
+    """Format a boolean-or-string state field for display.
+
+    Args:
+        raw: Upstream soft-read value (bool or free-text token).
+        true_label: Display label when ``raw`` is ``True``.
+        false_label: Display label when ``raw`` is ``False``.
+        default: Fallback when ``raw`` is missing or blank.
+
+    Returns:
+        Normalized uppercase display label.
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return true_label if raw else false_label
+    text = str(raw).strip()
+    return text.upper() if text else default
+
+
+def _format_latency(value: object | None, placeholder: str) -> str:
+    """Format a latency value (milliseconds) for display."""
+    if value is None:
+        return placeholder
+    if isinstance(value, (int, float)):
+        return f"{value:.0f} ms"
+    return _display_str(value, placeholder)
 
 
 def _bucket_order_status(status: str) -> str | None:
@@ -1424,6 +1505,7 @@ def paper_ledger_to_page_view(
         todays_pnl=ledger.todays_pnl,
         realized_pnl=ledger.realized_pnl,
         unrealized_pnl=ledger.unrealized_pnl,
+        total_pnl=ledger.total_pnl,
         orders_filled=ledger.orders_filled,
         orders_pending=ledger.orders_pending,
         orders_cancelled=ledger.orders_cancelled,
@@ -1456,6 +1538,14 @@ def paper_ledger_to_page_view(
             for row in ledger.orders
         ),
         equity_series=ledger.equity_series,
+        drawdown_series=ledger.drawdown_series,
+        exposure=ledger.exposure,
+        open_positions_count=ledger.open_positions_count,
+        closed_positions_count=ledger.closed_positions_count,
+        runner_state=ledger.runner_state,
+        runner_connection_status=ledger.runner_connection_status,
+        runner_latency=ledger.runner_latency,
+        runner_last_update=ledger.runner_last_update,
         source=ledger.source,
     )
 
@@ -2621,6 +2711,42 @@ class DashboardIntegrationFacade:
         if explicit_rejected is not None:
             rejected = _display_str(explicit_rejected, rejected)
 
+        total_pnl_raw = _field(snap, "total_pnl", "net_pnl")
+        total_pnl_display = _format_money(total_pnl_raw, ph)
+        if total_pnl_display == ph:
+            total_pnl_display = _compose_total_pnl(realized_raw, unrealized_raw, ph)
+
+        exposure_raw = _field(snap, "exposure", "total_exposure", "gross_notional")
+        if exposure_raw is None and portfolio is not None:
+            exposure_raw = _field(portfolio, "gross_notional", "exposure")
+
+        open_positions_count = str(len(positions))
+        closed_positions_raw = _field(snap, "closed_positions_count", "closed_positions")
+        if closed_positions_raw is None and portfolio is not None:
+            closed_positions_raw = _field(
+                portfolio, "closed_positions_count", "closed_positions"
+            )
+        closed_positions_count = _count_display(closed_positions_raw)
+
+        drawdown_raw = _field(snap, "drawdown_series")
+        if drawdown_raw is None and portfolio is not None:
+            drawdown_raw = _field(portfolio, "drawdown_series")
+        drawdown_series = _tuple_pairs(drawdown_raw)
+
+        runner_state = _state_display(
+            _field(snap, "runner_state", "run_state", "is_running", "running"),
+            true_label="RUNNING",
+            false_label="STOPPED",
+            default="UNKNOWN",
+        )
+        runner_connection_status = _state_display(
+            _field(snap, "runner_connection_status", "connected", "is_connected"),
+            true_label="CONNECTED",
+            false_label="DISCONNECTED",
+            default="UNKNOWN",
+        )
+        runner_latency = _format_latency(_field(snap, "latency_ms", "latency"), ph)
+
         has_live = any(
             (
                 cash_raw is not None,
@@ -2630,6 +2756,14 @@ class DashboardIntegrationFacade:
                 bool(orders),
             )
         )
+        last_update_raw = _field(snap, "last_update", "updated_at", "runner_last_update")
+        if last_update_raw is not None:
+            runner_last_update = _display_str(last_update_raw, ph)
+        elif has_live:
+            runner_last_update = as_of.strftime("%Y-%m-%d %H:%M:%S UTC")
+        else:
+            runner_last_update = ph
+
         return FacadePaperTradingLedger(
             schema_version=DASHBOARD_FACADE_SCHEMA_VERSION,
             as_of=as_of,
@@ -2640,6 +2774,7 @@ class DashboardIntegrationFacade:
             todays_pnl=_format_money(todays_raw, ph),
             realized_pnl=_format_money(realized_raw, ph),
             unrealized_pnl=_format_money(unrealized_raw, ph),
+            total_pnl=total_pnl_display,
             positions=tuple(positions),
             orders_filled=filled,
             orders_pending=pending,
@@ -2647,6 +2782,14 @@ class DashboardIntegrationFacade:
             orders_rejected=rejected,
             orders=orders,
             equity_series=_tuple_pairs(_attr(snap, "equity_series")),
+            drawdown_series=drawdown_series,
+            exposure=_format_money(exposure_raw, ph),
+            open_positions_count=open_positions_count,
+            closed_positions_count=closed_positions_count,
+            runner_state=runner_state,
+            runner_connection_status=runner_connection_status,
+            runner_latency=runner_latency,
+            runner_last_update=runner_last_update,
         )
 
     def _fetch_order_book(self) -> FacadeOrderBook:
@@ -3009,9 +3152,25 @@ class PresentationFacadeAdapter:
         """Map performance facade DTO to presentation view."""
         snap = self._facade.get_performance()
         metrics = dict(snap.metrics)
+
+        def _metric(*keys: str) -> str:
+            """Return the first present metric value, else the placeholder."""
+            for key in keys:
+                if key in metrics:
+                    return metrics[key]
+            return "—"
+
         return AnalyticsPageView(
-            win_rate=metrics.get("win_rate", "—"),
-            expectancy=metrics.get("expectancy", "—"),
+            win_rate=_metric("win_rate"),
+            expectancy=_metric("expectancy"),
+            profit_factor=_metric("profit_factor"),
+            average_winner=_metric("average_winner", "avg_winner"),
+            average_loser=_metric("average_loser", "avg_loser"),
+            largest_win=_metric("largest_win", "max_win"),
+            largest_loss=_metric("largest_loss", "max_loss"),
+            risk_reward=_metric("risk_reward", "risk_reward_ratio"),
+            sharpe=_metric("sharpe", "sharpe_ratio"),
+            max_drawdown=_metric("max_drawdown", "max_dd"),
             performance_series=snap.series,
             available=bool(snap.metrics or snap.series),
         )

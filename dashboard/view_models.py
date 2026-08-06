@@ -299,6 +299,7 @@ class PaperTradingPageView:
     todays_pnl: str = PLACEHOLDER
     realized_pnl: str = PLACEHOLDER
     unrealized_pnl: str = PLACEHOLDER
+    total_pnl: str = PLACEHOLDER
     orders_filled: str = "0"
     orders_pending: str = "0"
     orders_cancelled: str = "0"
@@ -306,6 +307,14 @@ class PaperTradingPageView:
     positions: tuple[PaperPositionView, ...] = ()
     orders: tuple["OrderRowView", ...] = ()
     equity_series: tuple[tuple[str, float], ...] = ()
+    drawdown_series: tuple[tuple[str, float], ...] = ()
+    exposure: str = PLACEHOLDER
+    open_positions_count: str = "0"
+    closed_positions_count: str = "0"
+    runner_state: str = "UNKNOWN"
+    runner_connection_status: str = "UNKNOWN"
+    runner_latency: str = PLACEHOLDER
+    runner_last_update: str = PLACEHOLDER
     source: str = "offline"
 
 
@@ -347,6 +356,44 @@ def paper_order_count_cards(view: PaperTradingPageView) -> tuple[KpiCardModel, .
         KpiCardModel("Pending", view.orders_pending),
         KpiCardModel("Cancelled", view.orders_cancelled),
         KpiCardModel("Rejected", view.orders_rejected),
+    )
+
+
+def paper_trading_position_summary_cards(
+    view: PaperTradingPageView,
+) -> tuple[KpiCardModel, ...]:
+    """Build Paper Trading position summary KPI cards.
+
+    Args:
+        view: Paper trading page snapshot.
+
+    Returns:
+        Open Positions, Closed Positions, Capital Used, Exposure cards.
+    """
+    return (
+        KpiCardModel("Open Positions", view.open_positions_count),
+        KpiCardModel("Closed Positions", view.closed_positions_count),
+        KpiCardModel("Capital Used", view.capital_used),
+        KpiCardModel("Exposure", view.exposure),
+    )
+
+
+def paper_trading_runner_status_cards(
+    view: PaperTradingPageView,
+) -> tuple[KpiCardModel, ...]:
+    """Build Paper Trading runner status KPI cards.
+
+    Args:
+        view: Paper trading page snapshot.
+
+    Returns:
+        Runner, Connection, Latency, Last Update cards.
+    """
+    return (
+        KpiCardModel("Runner", view.runner_state),
+        KpiCardModel("Connection", view.runner_connection_status),
+        KpiCardModel("Latency", view.runner_latency),
+        KpiCardModel("Last Update", view.runner_last_update),
     )
 
 
@@ -443,6 +490,14 @@ class AnalyticsPageView:
 
     win_rate: str = PLACEHOLDER
     expectancy: str = PLACEHOLDER
+    profit_factor: str = PLACEHOLDER
+    average_winner: str = PLACEHOLDER
+    average_loser: str = PLACEHOLDER
+    largest_win: str = PLACEHOLDER
+    largest_loss: str = PLACEHOLDER
+    risk_reward: str = PLACEHOLDER
+    sharpe: str = PLACEHOLDER
+    max_drawdown: str = PLACEHOLDER
     regime_histogram: tuple[tuple[str, float], ...] = ()
     performance_series: tuple[tuple[str, float], ...] = ()
     available: bool = False

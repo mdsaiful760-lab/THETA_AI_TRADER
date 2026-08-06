@@ -9,16 +9,27 @@ from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
+
 from dashboard import default_dashboard_ui_config
+from dashboard.dashboard_facade import (
+    DashboardFacade,
+    DashboardIntegrationFacade,
+    empty_paper_trading_ledger,
+    paper_ledger_to_page_view,
+)
 from dashboard.facade import NullIntegrationFacade
 from dashboard.pages import paper_trading as paper_trading_page
 from dashboard.view_models import (
+    AnalyticsPageView,
     DashboardRenderContext,
     DashboardSessionView,
     OrderRowView,
     PLACEHOLDER,
     PaperPositionView,
     PaperTradingPageView,
+    paper_trading_position_summary_cards,
+    paper_trading_runner_status_cards,
 )
 
 
@@ -156,13 +167,23 @@ class TestOfflinePlaceholders:
                     with patch("dashboard.pages.paper_trading.render_table") as table:
                         paper_trading_page.render(ctx)
                         header.assert_called_once()
-                        assert kpi.call_count >= 2
+                        assert kpi.call_count >= 5
                         assert table.call_count == 3
-            st_mock.subheader.assert_any_call("Paper account summary")
-            st_mock.subheader.assert_any_call("Open Positions")
-            st_mock.subheader.assert_any_call("Paper Orders")
-            st_mock.subheader.assert_any_call("Execution timeline")
-            st_mock.subheader.assert_any_call("Performance summary")
+            for title in (
+                "Paper account summary",
+                "Open Positions",
+                "Execution timeline",
+                "Performance KPIs",
+                "Equity Curve",
+                "Drawdown",
+                "Position Summary",
+                "Trade History",
+                "Statistics",
+                "Runner Status",
+            ):
+                st_mock.subheader.assert_any_call(title)
+            st_mock.plotly_chart.assert_called()
+            st_mock.download_button.assert_called()
 
 
 class TestLivePageDisplay:
@@ -234,14 +255,14 @@ class TestLivePageDisplay:
                 with patch("dashboard.pages.paper_trading.render_kpi_row") as kpi:
                     with patch("dashboard.pages.paper_trading.render_table") as table:
                         paper_trading_page.render(ctx)
-                        assert kpi.call_count >= 2
+                        assert kpi.call_count >= 5
                         assert table.call_count == 3
-                        positions, orders, timeline = [
+                        positions, timeline, trade_history = [
                             call.args[0] for call in table.call_args_list
                         ]
                         assert not positions.empty
-                        assert not orders.empty
                         assert not timeline.empty
+                        assert not trade_history.empty
 
     def test_resolve_exception_falls_back_to_placeholders(self) -> None:
         broken = MagicMock()
@@ -253,6 +274,336 @@ class TestLivePageDisplay:
         assert view.source == "offline"
 
 
+def _live_view_with_stats() -> PaperTradingPageView:
+    """Return a live-shaped view including the new professional dashboard fields."""
+    return replace(
+        _live_paper_view(),
+        total_pnl="2,500.00",
+        exposure="60,000.00",
+        open_positions_count="1",
+        closed_positions_count="3",
+        equity_series=(("2026-08-01", 970000.0), ("2026-08-06", 975000.0)),
+        drawdown_series=(("2026-08-01", 0.0), ("2026-08-06", -1.5)),
+        runner_state="RUNNING",
+        runner_connection_status="CONNECTED",
+        runner_latency="45 ms",
+        runner_last_update="2026-08-06 03:29:00 UTC",
+    )
+
+
+class TestPerformanceKpiCards:
+    """New Performance KPI row (#1): Account Balance / PnL / Win Rate / Profit Factor."""
+
+    def test_offline_placeholders(self) -> None:
+        view = NullIntegrationFacade().get_paper_trading()
+        cards = paper_trading_page._performance_kpi_cards(view, None)
+        assert [card.label for card in cards] == [
+            "Account Balance",
+            "Today's P&L",
+            "Total P&L",
+            "Win Rate",
+            "Profit Factor",
+        ]
+        assert all(card.value == PLACEHOLDER for card in cards)
+
+    def test_live_values(self) -> None:
+        view = _live_view_with_stats()
+        analytics = SimpleNamespace(win_rate="55%", profit_factor="1.75")
+        cards = paper_trading_page._performance_kpi_cards(view, analytics)
+        by_label = {card.label: card.value for card in cards}
+        assert by_label["Account Balance"] == "975,000.00"
+        assert by_label["Today's P&L"] == "2,500.00"
+        assert by_label["Total P&L"] == "2,500.00"
+        assert by_label["Win Rate"] == "55%"
+        assert by_label["Profit Factor"] == "1.75"
+
+
+class TestStatisticsCards:
+    """New Statistics section (#6): 8 soft-read metrics, never computed here."""
+
+    def test_offline_placeholders(self) -> None:
+        view = NullIntegrationFacade().get_paper_trading()
+        cards = paper_trading_page._statistics_cards(view, None)
+        assert [card.label for card in cards] == [
+            "Average Winner",
+            "Average Loser",
+            "Largest Win",
+            "Largest Loss",
+            "Expectancy",
+            "Risk Reward",
+            "Sharpe",
+            "Max Drawdown",
+        ]
+        assert all(card.value == PLACEHOLDER for card in cards)
+
+    def test_live_values(self) -> None:
+        view = _live_view_with_stats()
+        analytics = SimpleNamespace(
+            average_winner="800.00",
+            average_loser="400.00",
+            largest_win="3,000.00",
+            largest_loss="1,200.00",
+            expectancy="120.00",
+            risk_reward="1.8",
+            sharpe="1.2",
+            max_drawdown="4.5%",
+        )
+        cards = paper_trading_page._statistics_cards(view, analytics)
+        by_label = {card.label: card.value for card in cards}
+        assert by_label["Average Winner"] == "800.00"
+        assert by_label["Largest Win"] == "3,000.00"
+        assert by_label["Risk Reward"] == "1.8"
+        assert by_label["Sharpe"] == "1.2"
+        assert by_label["Max Drawdown"] == "4.5%"
+
+
+class TestViewModelMapping:
+    """view_models.py builder functions (#4 Position Summary, #7 Runner Status)."""
+
+    def test_position_summary_offline_placeholders(self) -> None:
+        view = NullIntegrationFacade().get_paper_trading()
+        cards = paper_trading_position_summary_cards(view)
+        assert [card.label for card in cards] == [
+            "Open Positions",
+            "Closed Positions",
+            "Capital Used",
+            "Exposure",
+        ]
+        by_label = {card.label: card.value for card in cards}
+        assert by_label["Open Positions"] == "0"
+        assert by_label["Closed Positions"] == "0"
+        assert by_label["Capital Used"] == PLACEHOLDER
+        assert by_label["Exposure"] == PLACEHOLDER
+
+    def test_position_summary_live_values(self) -> None:
+        view = _live_view_with_stats()
+        cards = paper_trading_position_summary_cards(view)
+        by_label = {card.label: card.value for card in cards}
+        assert by_label["Open Positions"] == "1"
+        assert by_label["Closed Positions"] == "3"
+        assert by_label["Exposure"] == "60,000.00"
+
+    def test_runner_status_offline_placeholders(self) -> None:
+        view = NullIntegrationFacade().get_paper_trading()
+        cards = paper_trading_runner_status_cards(view)
+        assert [card.label for card in cards] == [
+            "Runner",
+            "Connection",
+            "Latency",
+            "Last Update",
+        ]
+        by_label = {card.label: card.value for card in cards}
+        assert by_label["Runner"] == "STOPPED"
+        assert by_label["Connection"] == "DISCONNECTED"
+        assert by_label["Latency"] == PLACEHOLDER
+
+    def test_runner_status_live_values(self) -> None:
+        view = _live_view_with_stats()
+        cards = paper_trading_runner_status_cards(view)
+        by_label = {card.label: card.value for card in cards}
+        assert by_label["Runner"] == "RUNNING"
+        assert by_label["Connection"] == "CONNECTED"
+        assert by_label["Latency"] == "45 ms"
+
+    def test_analytics_page_view_new_fields_default_to_placeholder(self) -> None:
+        view = AnalyticsPageView()
+        assert view.profit_factor == PLACEHOLDER
+        assert view.average_winner == PLACEHOLDER
+        assert view.largest_win == PLACEHOLDER
+        assert view.risk_reward == PLACEHOLDER
+        assert view.sharpe == PLACEHOLDER
+        assert view.max_drawdown == PLACEHOLDER
+
+
+class TestEquityAndDrawdownCharts:
+    """Equity curve (#2) and drawdown (#3) series-to-dataframe mapping."""
+
+    def test_offline_series_are_empty_with_expected_columns(self) -> None:
+        view = NullIntegrationFacade().get_paper_trading()
+        equity_df = paper_trading_page._series_frame(view.equity_series, "equity")
+        drawdown_df = paper_trading_page._series_frame(view.drawdown_series, "drawdown")
+        assert equity_df.empty
+        assert list(equity_df.columns) == ["timestamp", "equity"]
+        assert drawdown_df.empty
+        assert list(drawdown_df.columns) == ["timestamp", "drawdown"]
+
+    def test_live_series_populate_dataframe(self) -> None:
+        view = _live_view_with_stats()
+        equity_df = paper_trading_page._series_frame(view.equity_series, "equity")
+        drawdown_df = paper_trading_page._series_frame(view.drawdown_series, "drawdown")
+        assert list(equity_df["equity"]) == [970000.0, 975000.0]
+        assert list(drawdown_df["drawdown"]) == [0.0, -1.5]
+
+
+class TestTradeHistory:
+    """Trade History (#5): search, filter, native sorting, CSV export."""
+
+    def _sample_trades(self) -> pd.DataFrame:
+        view = replace(
+            _live_paper_view(),
+            orders=(
+                OrderRowView(
+                    order_id="1",
+                    status="FILLED",
+                    symbol="NIFTY",
+                    side="SELL",
+                    quantity="1",
+                    timestamp="t1",
+                ),
+                OrderRowView(
+                    order_id="2",
+                    status="PENDING",
+                    symbol="BANKNIFTY",
+                    side="BUY",
+                    quantity="2",
+                    timestamp="t2",
+                ),
+                OrderRowView(
+                    order_id="3",
+                    status="CANCELLED",
+                    symbol="NIFTY",
+                    side="SELL",
+                    quantity="1",
+                    timestamp="t3",
+                ),
+            ),
+        )
+        df = paper_trading_page._orders_frame(view)
+        assert isinstance(df, pd.DataFrame)
+        return df
+
+    def test_filter_by_status(self) -> None:
+        df = self._sample_trades()
+        filtered = paper_trading_page._filter_trade_history(df, statuses=["FILLED"])
+        assert list(filtered["Order ID"]) == ["1"]
+
+    def test_filter_by_search_term(self) -> None:
+        df = self._sample_trades()
+        filtered = paper_trading_page._filter_trade_history(df, search="banknifty")
+        assert list(filtered["Order ID"]) == ["2"]
+
+    def test_filter_combined_search_and_status(self) -> None:
+        df = self._sample_trades()
+        filtered = paper_trading_page._filter_trade_history(
+            df, search="nifty", statuses=["FILLED", "CANCELLED"]
+        )
+        assert set(filtered["Order ID"]) == {"1", "3"}
+
+    def test_filter_no_match_returns_empty(self) -> None:
+        df = self._sample_trades()
+        filtered = paper_trading_page._filter_trade_history(df, search="doesnotexist")
+        assert filtered.empty
+
+    def test_no_filters_returns_all_rows(self) -> None:
+        df = self._sample_trades()
+        filtered = paper_trading_page._filter_trade_history(df)
+        assert len(filtered) == len(df)
+
+    def test_csv_export_contains_rows(self) -> None:
+        df = self._sample_trades()
+        csv_text = paper_trading_page._trade_history_csv(df)
+        assert "Order ID" in csv_text
+        assert "1" in csv_text and "FILLED" in csv_text
+        assert csv_text.count("\n") >= 3
+
+    def test_csv_export_offline_is_header_only(self) -> None:
+        view = NullIntegrationFacade().get_paper_trading()
+        df = paper_trading_page._orders_frame(view)
+        csv_text = paper_trading_page._trade_history_csv(df)
+        assert csv_text.strip() == "Order ID,Symbol,Side,Qty,Status,Timestamp"
+
+
+class TestFacadeMapping:
+    """dashboard_facade.py soft-reads powering the new page sections."""
+
+    def test_empty_ledger_new_field_defaults(self) -> None:
+        ledger = empty_paper_trading_ledger(as_of=FIXED_NOW)
+        assert ledger.total_pnl == PLACEHOLDER
+        assert ledger.exposure == PLACEHOLDER
+        assert ledger.open_positions_count == "0"
+        assert ledger.closed_positions_count == "0"
+        assert ledger.drawdown_series == ()
+        assert ledger.runner_state == "STOPPED"
+        assert ledger.runner_connection_status == "DISCONNECTED"
+        assert ledger.runner_latency == PLACEHOLDER
+
+    def test_paper_ledger_to_page_view_carries_new_fields(self) -> None:
+        ledger = empty_paper_trading_ledger(as_of=FIXED_NOW)
+        view = paper_ledger_to_page_view(ledger)
+        assert view.total_pnl == ledger.total_pnl
+        assert view.drawdown_series == ledger.drawdown_series
+        assert view.runner_state == ledger.runner_state
+        assert view.exposure == ledger.exposure
+
+    def test_live_ledger_soft_reads_new_fields(self) -> None:
+        session = SimpleNamespace(
+            get_paper_trading_ledger=MagicMock(
+                return_value=SimpleNamespace(
+                    available_cash=100000.0,
+                    realized_pnl=200.0,
+                    unrealized_pnl=250.0,
+                    exposure=60000.0,
+                    closed_positions=3,
+                    drawdown_series=(("2026-08-05", -1.2),),
+                    runner_state="RUNNING",
+                    connected=True,
+                    latency_ms=42,
+                    positions=(),
+                    orders=(),
+                )
+            )
+        )
+        facade = DashboardIntegrationFacade(session=session, clock=lambda: FIXED_NOW)
+        ledger = facade.get_paper_trading_ledger()
+        assert ledger.total_pnl == "450.00"
+        assert ledger.exposure == "60,000.00"
+        assert ledger.closed_positions_count == "3"
+        assert ledger.drawdown_series == (("2026-08-05", -1.2),)
+        assert ledger.runner_state == "RUNNING"
+        assert ledger.runner_connection_status == "CONNECTED"
+        assert ledger.runner_latency == "42 ms"
+
+    def test_open_positions_count_derived_from_positions_length(self) -> None:
+        session = SimpleNamespace(
+            get_paper_trading_ledger=MagicMock(
+                return_value=SimpleNamespace(
+                    positions=(
+                        SimpleNamespace(symbol="NIFTY", quantity=1, status="OPEN"),
+                        SimpleNamespace(symbol="BANKNIFTY", quantity=-1, status="OPEN"),
+                    ),
+                )
+            )
+        )
+        facade = DashboardIntegrationFacade(session=session, clock=lambda: FIXED_NOW)
+        ledger = facade.get_paper_trading_ledger()
+        assert ledger.open_positions_count == "2"
+
+    def test_analytics_statistics_mapped_from_metrics_dict(self) -> None:
+        session = SimpleNamespace(
+            get_performance=MagicMock(
+                return_value=SimpleNamespace(
+                    metrics={
+                        "win_rate": "55%",
+                        "profit_factor": "1.75",
+                        "average_winner": "800.00",
+                        "largest_win": "3000.00",
+                        "sharpe": "1.2",
+                        "max_drawdown": "4.5%",
+                    },
+                    series=(),
+                )
+            )
+        )
+        facade = DashboardFacade(session=session, clock=lambda: FIXED_NOW)
+        view = facade.as_presentation_facade().get_analytics()
+        assert view.win_rate == "55%"
+        assert view.profit_factor == "1.75"
+        assert view.average_winner == "800.00"
+        assert view.largest_win == "3000.00"
+        assert view.sharpe == "1.2"
+        assert view.max_drawdown == "4.5%"
+
+
 class TestNoForbiddenImports:
     """Page must remain presentation-only."""
 
@@ -262,6 +613,10 @@ class TestNoForbiddenImports:
         "execution",
         "paper_trading",
         "strategy",
+        "risk",
+        "decision",
+        "market_data",
+        "apme",
     )
 
     def test_page_has_no_forbidden_imports(self) -> None:
