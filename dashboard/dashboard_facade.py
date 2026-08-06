@@ -222,12 +222,20 @@ class FacadeOrderRow:
 
 @dataclass(frozen=True)
 class FacadePortfolioPositionRow:
-    """Portfolio position row."""
+    """Portfolio holding row."""
 
     symbol: str
     quantity: str
     exposure: str
     pnl: str
+    product: str = PLACEHOLDER
+    avg_price: str = PLACEHOLDER
+    current_price: str = PLACEHOLDER
+    market_value: str = PLACEHOLDER
+    unrealized_pnl: str = PLACEHOLDER
+    realized_pnl: str = PLACEHOLDER
+    day_change_pct: str = PLACEHOLDER
+    weight_pct: str = PLACEHOLDER
 
 
 @dataclass(frozen=True)
@@ -411,6 +419,39 @@ class FacadePortfolio:
     positions: tuple[FacadePortfolioPositionRow, ...]
     equity_series: tuple[tuple[str, float], ...]
     allocation_series: tuple[tuple[str, float], ...]
+    # Portfolio Summary
+    cash_available: str = PLACEHOLDER
+    margin_used: str = PLACEHOLDER
+    todays_pnl: str = PLACEHOLDER
+    total_pnl: str = PLACEHOLDER
+    # Allocation breakdowns
+    allocation_by_sector: tuple[tuple[str, float], ...] = ()
+    allocation_by_instrument: tuple[tuple[str, float], ...] = ()
+    allocation_by_product: tuple[tuple[str, float], ...] = ()
+    # Exposure
+    long_exposure: str = PLACEHOLDER
+    short_exposure: str = PLACEHOLDER
+    net_exposure: str = PLACEHOLDER
+    gross_exposure: str = PLACEHOLDER
+    # Portfolio Performance
+    daily_pnl_series: tuple[tuple[str, float], ...] = ()
+    cumulative_pnl_series: tuple[tuple[str, float], ...] = ()
+    # Portfolio Risk Snapshot
+    largest_position: str = PLACEHOLDER
+    largest_loss: str = PLACEHOLDER
+    largest_gain: str = PLACEHOLDER
+    portfolio_beta: str = PLACEHOLDER
+    diversification_score: str = PLACEHOLDER
+    # Position Breakdown
+    total_positions_count: str = "0"
+    open_positions_count: str = "0"
+    closed_positions_count: str = "0"
+    long_positions_count: str = "0"
+    short_positions_count: str = "0"
+    # Portfolio Status
+    broker_connection_status: str = "DISCONNECTED"
+    portfolio_sync_status: str = "UNKNOWN"
+    last_update: str = PLACEHOLDER
 
 
 @dataclass(frozen=True)
@@ -1498,6 +1539,33 @@ def _count_order_buckets(
     return str(filled), str(pending), str(cancelled), str(rejected)
 
 
+def _count_long_short_positions(rows_raw: object) -> tuple[str, str]:
+    """Bucket already-present position quantities into long/short counts.
+
+    Display-only bucketing of already-computed upstream quantities — rows
+    with a non-numeric or zero quantity are not counted in either bucket.
+
+    Args:
+        rows_raw: Upstream position row objects.
+
+    Returns:
+        ``(long_count, short_count)`` display strings.
+    """
+    long_count = short_count = 0
+    try:
+        for item in rows_raw if rows_raw is not None else ():
+            quantity = _parse_float(_attr(item, "quantity"))
+            if quantity is None or quantity == 0:
+                continue
+            if quantity > 0:
+                long_count += 1
+            else:
+                short_count += 1
+    except TypeError:
+        pass
+    return str(long_count), str(short_count)
+
+
 def paper_ledger_to_page_view(
     ledger: FacadePaperTradingLedger,
 ) -> PaperTradingPageView:
@@ -1562,6 +1630,68 @@ def paper_ledger_to_page_view(
     )
 
 
+def portfolio_to_page_view(snap: FacadePortfolio) -> PortfolioPageView:
+    """Map facade portfolio DTO to presentation ``PortfolioPageView``.
+
+    Args:
+        snap: Facade portfolio DTO.
+
+    Returns:
+        Presentation view for the Portfolio page.
+    """
+    return PortfolioPageView(
+        equity=snap.equity,
+        exposure=snap.exposure,
+        utilization=snap.utilization,
+        positions=tuple(
+            PortfolioPositionView(
+                symbol=row.symbol,
+                quantity=row.quantity,
+                exposure=row.exposure,
+                pnl=row.pnl,
+                product=row.product,
+                avg_price=row.avg_price,
+                current_price=row.current_price,
+                market_value=row.market_value,
+                unrealized_pnl=row.unrealized_pnl,
+                realized_pnl=row.realized_pnl,
+                day_change_pct=row.day_change_pct,
+                weight_pct=row.weight_pct,
+            )
+            for row in snap.positions
+        ),
+        equity_series=snap.equity_series,
+        allocation=snap.allocation_series,
+        cash_available=snap.cash_available,
+        margin_used=snap.margin_used,
+        todays_pnl=snap.todays_pnl,
+        total_pnl=snap.total_pnl,
+        allocation_by_sector=snap.allocation_by_sector,
+        allocation_by_instrument=snap.allocation_by_instrument,
+        allocation_by_product=snap.allocation_by_product,
+        long_exposure=snap.long_exposure,
+        short_exposure=snap.short_exposure,
+        net_exposure=snap.net_exposure,
+        gross_exposure=snap.gross_exposure,
+        daily_pnl_series=snap.daily_pnl_series,
+        cumulative_pnl_series=snap.cumulative_pnl_series,
+        largest_position=snap.largest_position,
+        largest_loss=snap.largest_loss,
+        largest_gain=snap.largest_gain,
+        portfolio_beta=snap.portfolio_beta,
+        diversification_score=snap.diversification_score,
+        total_positions_count=snap.total_positions_count,
+        open_positions_count=snap.open_positions_count,
+        closed_positions_count=snap.closed_positions_count,
+        long_positions_count=snap.long_positions_count,
+        short_positions_count=snap.short_positions_count,
+        broker_connection_status=snap.broker_connection_status,
+        portfolio_sync_status=snap.portfolio_sync_status,
+        last_update=snap.last_update,
+        source=snap.source,
+    )
+
+
 def empty_order_book(
     *,
     as_of: datetime | None = None,
@@ -1600,6 +1730,32 @@ def empty_portfolio(
         positions=(),
         equity_series=(),
         allocation_series=(),
+        cash_available=placeholder,
+        margin_used=placeholder,
+        todays_pnl=placeholder,
+        total_pnl=placeholder,
+        allocation_by_sector=(),
+        allocation_by_instrument=(),
+        allocation_by_product=(),
+        long_exposure=placeholder,
+        short_exposure=placeholder,
+        net_exposure=placeholder,
+        gross_exposure=placeholder,
+        daily_pnl_series=(),
+        cumulative_pnl_series=(),
+        largest_position=placeholder,
+        largest_loss=placeholder,
+        largest_gain=placeholder,
+        portfolio_beta=placeholder,
+        diversification_score=placeholder,
+        total_positions_count="0",
+        open_positions_count="0",
+        closed_positions_count="0",
+        long_positions_count="0",
+        short_positions_count="0",
+        broker_connection_status="DISCONNECTED",
+        portfolio_sync_status="UNKNOWN",
+        last_update=placeholder,
     )
 
 
@@ -2904,13 +3060,14 @@ class DashboardIntegrationFacade:
     def _fetch_portfolio(self) -> FacadePortfolio:
         """Build portfolio snapshot from optional upstream accessor."""
         ph = self._config.placeholder
+        as_of = self._clock()
         if self._session is None:
-            return empty_portfolio(as_of=self._clock(), placeholder=ph)
+            return empty_portfolio(as_of=as_of, placeholder=ph)
         snap = self._call_optional("get_portfolio") or self._call_optional(
             "get_portfolio_snapshot"
         )
         if snap is None:
-            return empty_portfolio(as_of=self._clock(), placeholder=ph)
+            return empty_portfolio(as_of=as_of, placeholder=ph)
         rows_raw = _attr(snap, "positions") or ()
         rows: list[FacadePortfolioPositionRow] = []
         for item in rows_raw if rows_raw is not None else ():
@@ -2920,12 +3077,84 @@ class DashboardIntegrationFacade:
                     quantity=_display_str(_attr(item, "quantity"), ph),
                     exposure=_display_str(_attr(item, "exposure"), ph),
                     pnl=_display_str(_attr(item, "pnl"), ph),
+                    product=_display_str(
+                        _field(item, "product", "product_type"), ph
+                    ),
+                    avg_price=_display_str(
+                        _field(item, "avg_price", "average_price"), ph
+                    ),
+                    current_price=_display_str(
+                        _field(item, "current_price", "ltp", "mark", "last_price"),
+                        ph,
+                    ),
+                    market_value=_display_str(
+                        _field(item, "market_value", "value"), ph
+                    ),
+                    unrealized_pnl=_display_str(
+                        _field(item, "unrealized_pnl", "mtm"), ph
+                    ),
+                    realized_pnl=_display_str(_field(item, "realized_pnl"), ph),
+                    day_change_pct=_display_str(
+                        _field(item, "day_change_pct", "change_pct", "day_change"),
+                        ph,
+                    ),
+                    weight_pct=_display_str(
+                        _field(item, "weight_pct", "weight"), ph
+                    ),
                 )
             )
         allocation = _attr(snap, "allocation_series") or _attr(snap, "allocation")
+
+        total_positions = str(len(rows))
+        open_positions_raw = _field(snap, "open_positions_count", "open_positions")
+        open_positions = (
+            _count_display(open_positions_raw)
+            if open_positions_raw is not None
+            else total_positions
+        )
+        closed_positions = _count_display(
+            _field(snap, "closed_positions_count", "closed_positions")
+        )
+        long_positions_raw = _field(snap, "long_positions_count", "long_positions")
+        short_positions_raw = _field(snap, "short_positions_count", "short_positions")
+        if long_positions_raw is not None or short_positions_raw is not None:
+            long_positions = _count_display(long_positions_raw)
+            short_positions = _count_display(short_positions_raw)
+        else:
+            long_positions, short_positions = _count_long_short_positions(rows_raw)
+
+        broker_connection_status = _state_display(
+            _field(snap, "broker_connection_status", "broker_status", "connected"),
+            true_label="CONNECTED",
+            false_label="DISCONNECTED",
+            default="UNKNOWN",
+        )
+        if broker_connection_status == "UNKNOWN":
+            try:
+                system_status = self.get_system_status()
+            except Exception:  # noqa: BLE001 - optional soft-read
+                system_status = None
+            if system_status is not None:
+                broker_connection_status = system_status.broker_status
+
+        has_live = any(
+            (
+                _attr(snap, "equity") is not None,
+                _attr(snap, "exposure") is not None,
+                bool(rows),
+            )
+        )
+        last_update_raw = _field(snap, "last_update", "updated_at")
+        if last_update_raw is not None:
+            last_update = _display_str(last_update_raw, ph)
+        elif has_live:
+            last_update = as_of.strftime("%Y-%m-%d %H:%M:%S UTC")
+        else:
+            last_update = ph
+
         return FacadePortfolio(
             schema_version=DASHBOARD_FACADE_SCHEMA_VERSION,
-            as_of=self._clock(),
+            as_of=as_of,
             source="live",
             equity=_display_str(_attr(snap, "equity"), ph),
             exposure=_display_str(_attr(snap, "exposure"), ph),
@@ -2933,6 +3162,52 @@ class DashboardIntegrationFacade:
             positions=tuple(rows),
             equity_series=_tuple_pairs(_attr(snap, "equity_series")),
             allocation_series=_tuple_pairs(allocation),
+            cash_available=_display_str(
+                _field(snap, "cash_available", "available_cash", "cash"), ph
+            ),
+            margin_used=_display_str(
+                _field(snap, "margin_used", "used_margin"), ph
+            ),
+            todays_pnl=_display_str(
+                _field(snap, "todays_pnl", "today_pnl", "daily_pnl"), ph
+            ),
+            total_pnl=_display_str(_field(snap, "total_pnl", "net_pnl"), ph),
+            allocation_by_sector=_tuple_pairs(
+                _field(snap, "allocation_by_sector", "sector_allocation")
+            ),
+            allocation_by_instrument=_tuple_pairs(
+                _field(snap, "allocation_by_instrument", "instrument_allocation")
+            ),
+            allocation_by_product=_tuple_pairs(
+                _field(snap, "allocation_by_product", "product_allocation")
+            ),
+            long_exposure=_display_str(_field(snap, "long_exposure"), ph),
+            short_exposure=_display_str(_field(snap, "short_exposure"), ph),
+            net_exposure=_display_str(_field(snap, "net_exposure"), ph),
+            gross_exposure=_display_str(_field(snap, "gross_exposure"), ph),
+            daily_pnl_series=_tuple_pairs(_field(snap, "daily_pnl_series")),
+            cumulative_pnl_series=_tuple_pairs(
+                _field(snap, "cumulative_pnl_series")
+            ),
+            largest_position=_display_str(_field(snap, "largest_position"), ph),
+            largest_loss=_display_str(_field(snap, "largest_loss"), ph),
+            largest_gain=_display_str(_field(snap, "largest_gain"), ph),
+            portfolio_beta=_display_str(
+                _field(snap, "portfolio_beta", "beta"), ph
+            ),
+            diversification_score=_display_str(
+                _field(snap, "diversification_score"), ph
+            ),
+            total_positions_count=total_positions,
+            open_positions_count=open_positions,
+            closed_positions_count=closed_positions,
+            long_positions_count=long_positions,
+            short_positions_count=short_positions,
+            broker_connection_status=broker_connection_status,
+            portfolio_sync_status=_display_str(
+                _field(snap, "portfolio_sync_status", "sync_status"), ph
+            ),
+            last_update=last_update,
         )
 
     def _fetch_risk(self) -> FacadeRisk:
@@ -3182,23 +3457,7 @@ class PresentationFacadeAdapter:
 
     def get_portfolio(self) -> PortfolioPageView:
         """Map portfolio facade DTO to presentation view."""
-        snap = self._facade.get_portfolio()
-        return PortfolioPageView(
-            equity=snap.equity,
-            exposure=snap.exposure,
-            utilization=snap.utilization,
-            positions=tuple(
-                PortfolioPositionView(
-                    symbol=row.symbol,
-                    quantity=row.quantity,
-                    exposure=row.exposure,
-                    pnl=row.pnl,
-                )
-                for row in snap.positions
-            ),
-            equity_series=snap.equity_series,
-            allocation=snap.allocation_series,
-        )
+        return portfolio_to_page_view(self._facade.get_portfolio())
 
     def get_risk(self) -> RiskPageView:
         """Map risk facade DTO to presentation view."""

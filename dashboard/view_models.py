@@ -495,12 +495,20 @@ def orders_status_distribution(view: OrdersPageView) -> tuple[tuple[str, float],
 
 @dataclass(frozen=True)
 class PortfolioPositionView:
-    """Portfolio position row."""
+    """Portfolio holding row (Holdings Table)."""
 
     symbol: str
     quantity: str = PLACEHOLDER
     exposure: str = PLACEHOLDER
     pnl: str = PLACEHOLDER
+    product: str = PLACEHOLDER
+    avg_price: str = PLACEHOLDER
+    current_price: str = PLACEHOLDER
+    market_value: str = PLACEHOLDER
+    unrealized_pnl: str = PLACEHOLDER
+    realized_pnl: str = PLACEHOLDER
+    day_change_pct: str = PLACEHOLDER
+    weight_pct: str = PLACEHOLDER
 
 
 @dataclass(frozen=True)
@@ -513,6 +521,134 @@ class PortfolioPageView:
     positions: tuple[PortfolioPositionView, ...] = ()
     equity_series: tuple[tuple[str, float], ...] = ()
     allocation: tuple[tuple[str, float], ...] = ()
+    # Portfolio Summary
+    cash_available: str = PLACEHOLDER
+    margin_used: str = PLACEHOLDER
+    todays_pnl: str = PLACEHOLDER
+    total_pnl: str = PLACEHOLDER
+    # Allocation breakdowns
+    allocation_by_sector: tuple[tuple[str, float], ...] = ()
+    allocation_by_instrument: tuple[tuple[str, float], ...] = ()
+    allocation_by_product: tuple[tuple[str, float], ...] = ()
+    # Exposure
+    long_exposure: str = PLACEHOLDER
+    short_exposure: str = PLACEHOLDER
+    net_exposure: str = PLACEHOLDER
+    gross_exposure: str = PLACEHOLDER
+    # Portfolio Performance
+    daily_pnl_series: tuple[tuple[str, float], ...] = ()
+    cumulative_pnl_series: tuple[tuple[str, float], ...] = ()
+    # Portfolio Risk Snapshot
+    largest_position: str = PLACEHOLDER
+    largest_loss: str = PLACEHOLDER
+    largest_gain: str = PLACEHOLDER
+    portfolio_beta: str = PLACEHOLDER
+    diversification_score: str = PLACEHOLDER
+    # Position Breakdown
+    total_positions_count: str = "0"
+    open_positions_count: str = "0"
+    closed_positions_count: str = "0"
+    long_positions_count: str = "0"
+    short_positions_count: str = "0"
+    # Portfolio Status
+    broker_connection_status: str = "DISCONNECTED"
+    portfolio_sync_status: str = "UNKNOWN"
+    last_update: str = PLACEHOLDER
+    source: str = "offline"
+
+
+def portfolio_summary_kpi_cards(view: PortfolioPageView) -> tuple[KpiCardModel, ...]:
+    """Build Portfolio Summary KPI cards.
+
+    Args:
+        view: Portfolio page snapshot.
+
+    Returns:
+        Total Portfolio Value, Cash Available, Margin Used, Today's P&L,
+        Total P&L cards.
+    """
+    return (
+        KpiCardModel("Total Portfolio Value", view.equity),
+        KpiCardModel("Cash Available", view.cash_available),
+        KpiCardModel("Margin Used", view.margin_used),
+        KpiCardModel("Today's P&L", view.todays_pnl),
+        KpiCardModel("Total P&L", view.total_pnl),
+    )
+
+
+def portfolio_exposure_cards(view: PortfolioPageView) -> tuple[KpiCardModel, ...]:
+    """Build Exposure KPI cards.
+
+    Args:
+        view: Portfolio page snapshot.
+
+    Returns:
+        Total, Long, Short, Net, and Gross exposure cards.
+    """
+    return (
+        KpiCardModel("Total Exposure", view.exposure),
+        KpiCardModel("Long Exposure", view.long_exposure),
+        KpiCardModel("Short Exposure", view.short_exposure),
+        KpiCardModel("Net Exposure", view.net_exposure),
+        KpiCardModel("Gross Exposure", view.gross_exposure),
+    )
+
+
+def portfolio_risk_snapshot_cards(view: PortfolioPageView) -> tuple[KpiCardModel, ...]:
+    """Build Portfolio Risk Snapshot KPI cards.
+
+    Args:
+        view: Portfolio page snapshot.
+
+    Returns:
+        Largest Position, Largest Loss, Largest Gain, Portfolio Beta, and
+        Diversification Score cards.
+    """
+    return (
+        KpiCardModel("Largest Position", view.largest_position),
+        KpiCardModel("Largest Loss", view.largest_loss),
+        KpiCardModel("Largest Gain", view.largest_gain),
+        KpiCardModel("Portfolio Beta", view.portfolio_beta),
+        KpiCardModel("Diversification Score", view.diversification_score),
+    )
+
+
+def portfolio_position_breakdown_cards(
+    view: PortfolioPageView,
+) -> tuple[KpiCardModel, ...]:
+    """Build Position Breakdown count cards.
+
+    Args:
+        view: Portfolio page snapshot.
+
+    Returns:
+        Total, Open, Closed, Long, and Short position count cards.
+    """
+    return (
+        KpiCardModel("Total Positions", view.total_positions_count),
+        KpiCardModel("Open Positions", view.open_positions_count),
+        KpiCardModel("Closed Positions", view.closed_positions_count),
+        KpiCardModel("Long Positions", view.long_positions_count),
+        KpiCardModel("Short Positions", view.short_positions_count),
+    )
+
+
+def portfolio_status_cards(view: PortfolioPageView) -> tuple[KpiCardModel, ...]:
+    """Build Portfolio Status cards.
+
+    Args:
+        view: Portfolio page snapshot.
+
+    Returns:
+        Broker Connection, Portfolio Sync, Last Update, and Data Source cards.
+    """
+    data_source = view.source.upper() if view.source else PLACEHOLDER
+    return (
+        KpiCardModel("Broker Connection", view.broker_connection_status),
+        KpiCardModel("Portfolio Sync", view.portfolio_sync_status),
+        KpiCardModel("Last Update", view.last_update),
+        KpiCardModel("Data Source", data_source),
+    )
 
 
 @dataclass(frozen=True)
