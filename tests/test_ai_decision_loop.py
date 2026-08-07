@@ -88,6 +88,29 @@ def make_loop(
     return loop, provider, registry
 
 
+class FakeOIEngine:
+    """Deterministic live-OI-cycle double matching ``live_oi_engine.LiveOIEngine``."""
+
+    def __init__(self, result=_UNSET, *, raise_error: bool = False) -> None:
+        self._result = (
+            {
+                "status": "ANALYSIS_COMPLETE",
+                "analysis_ready": True,
+                "chain_analysis": {"oi_directional_bias": "BULLISH"},
+            }
+            if result is _UNSET
+            else result
+        )
+        self._raise_error = raise_error
+        self.calls = 0
+
+    def run_cycle(self):
+        self.calls += 1
+        if self._raise_error:
+            raise RuntimeError("oi engine unavailable")
+        return self._result
+
+
 class TestConfig:
     """AiDecisionLoopConfig validation."""
 
@@ -171,6 +194,82 @@ class TestFullPipelineHappyPath:
         assert decision_a.status == decision_b.status
         assert decision_a.final_lots == decision_b.final_lots
         assert decision_a.strategy_id == decision_b.strategy_id
+
+
+class TestOIEngineIntegration:
+    """Live OI cycle output is threaded into regime_engine.analyze(oi_analysis=...)."""
+
+    def test_no_oi_engine_configured_passes_none(self) -> None:
+        captured: dict = {}
+
+        class _CapturingRegimeEngine:
+            def analyze(self, *args, **kwargs):
+                captured.update(kwargs)
+                return {"regime": "TRENDING", "regime_confidence": "HIGH"}
+
+        loop, _, _ = make_loop(regime_engine=_CapturingRegimeEngine())
+        loop.run_once()
+
+        assert "oi_analysis" in captured
+        assert captured["oi_analysis"] is None
+
+    def test_oi_chain_analysis_forwarded_to_regime_engine(self) -> None:
+        captured: dict = {}
+
+        class _CapturingRegimeEngine:
+            def analyze(self, *args, **kwargs):
+                captured.update(kwargs)
+                return {"regime": "TRENDING", "regime_confidence": "HIGH"}
+
+        oi_engine = FakeOIEngine(
+            result={
+                "status": "ANALYSIS_COMPLETE",
+                "analysis_ready": True,
+                "chain_analysis": {"oi_directional_bias": "BULLISH"},
+            }
+        )
+        loop, _, _ = make_loop(regime_engine=_CapturingRegimeEngine(), oi_engine=oi_engine)
+        loop.run_once()
+
+        assert oi_engine.calls == 1
+        assert captured["oi_analysis"] == {"oi_directional_bias": "BULLISH"}
+
+    def test_oi_cycle_not_ready_passes_none(self) -> None:
+        captured: dict = {}
+
+        class _CapturingRegimeEngine:
+            def analyze(self, *args, **kwargs):
+                captured.update(kwargs)
+                return {"regime": "TRENDING", "regime_confidence": "HIGH"}
+
+        oi_engine = FakeOIEngine(
+            result={
+                "status": "NO_PREVIOUS_SNAPSHOT",
+                "analysis_ready": False,
+                "chain_analysis": None,
+            }
+        )
+        loop, _, _ = make_loop(regime_engine=_CapturingRegimeEngine(), oi_engine=oi_engine)
+        loop.run_once()
+
+        assert captured["oi_analysis"] is None
+
+    def test_oi_engine_failure_degrades_gracefully(self) -> None:
+        oi_engine = FakeOIEngine(raise_error=True)
+        loop, _, _ = make_loop(oi_engine=oi_engine)
+        decision = loop.run_once()
+
+        assert oi_engine.calls == 1
+        assert decision.status is not PaperTradeDecisionStatus.ERROR
+        assert decision.market_regime != PLACEHOLDER
+
+    def test_end_to_end_with_oi_engine_still_yields_trade_candidate(self) -> None:
+        oi_engine = FakeOIEngine()
+        loop, _, _ = make_loop(oi_engine=oi_engine)
+        decision = loop.run_once()
+
+        assert oi_engine.calls == 1
+        assert decision.status is PaperTradeDecisionStatus.TRADE_CANDIDATE
 
 
 class TestNoSnapshot:

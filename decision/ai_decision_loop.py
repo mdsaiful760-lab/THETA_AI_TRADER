@@ -3,13 +3,14 @@
 Wires the existing, already-implemented engines into one continuous,
 read-only decision pipeline:
 
-    live market snapshot -> market regime analysis -> strategy evaluation
-    and selection -> risk validation -> position sizing -> a single
-    :class:`PaperTradeDecision`.
+    live market snapshot -> (optional live OI cycle) -> market regime
+    analysis -> strategy evaluation and selection -> risk validation ->
+    position sizing -> a single :class:`PaperTradeDecision`.
 
-Orchestration only — this module never reimplements market regime,
+Orchestration only — this module never reimplements OI, market regime,
 strategy, risk, or position-sizing business logic; it calls the existing
-engines' public APIs (:class:`market_regime_engine.MarketRegimeEngine`,
+engines' public APIs (:class:`live_oi_engine.LiveOIEngine` ->
+:class:`oi_engine.OIEngine`, :class:`market_regime_engine.MarketRegimeEngine`,
 :class:`strategy.strategy_evaluation_engine.StrategyEvaluationEngine`,
 :class:`decision.trade_decision_engine.TradeDecisionEngine`,
 :class:`risk.risk_engine.RiskEngine`,
@@ -381,6 +382,18 @@ class RegimeAnalyzer(Protocol):
         """Return a regime analysis result mapping."""
 
 
+class OIAnalyzer(Protocol):
+    """Structural protocol for the injected live OI engine.
+
+    Matches :class:`live_oi_engine.LiveOIEngine`, which already sequences
+    live tick -> option chain -> :meth:`oi_engine.OIEngine.analyze_chain`
+    for one cycle and reports its result via ``chain_analysis``.
+    """
+
+    def run_cycle(self) -> Mapping[str, Any]:
+        """Run one live OI cycle and return its result mapping."""
+
+
 class AIDecisionLoop:
     """Continuous, thread-safe AI decision loop orchestrator.
 
@@ -401,6 +414,7 @@ class AIDecisionLoop:
         market_data_engine: SnapshotProvider,
         strategy_registry: StrategyRegistry,
         regime_engine: RegimeAnalyzer | None = None,
+        oi_engine: OIAnalyzer | None = None,
         strategy_evaluation_engine: StrategyEvaluationEngine | None = None,
         trade_decision_engine: TradeDecisionEngine | None = None,
         risk_engine: RiskEngine | None = None,
@@ -421,6 +435,13 @@ class AIDecisionLoop:
                 strategy plugins (never constructed or mutated here).
             regime_engine: Market regime analyzer; defaults to a fresh
                 :class:`market_regime_engine.MarketRegimeEngine`.
+            oi_engine: Live OI cycle source (e.g.
+                :class:`live_oi_engine.LiveOIEngine`); its ``chain_analysis``
+                output is threaded into ``regime_engine.analyze(oi_analysis=...)``
+                each cycle. Optional — when omitted, regime analysis simply
+                runs without OI input (unchanged prior behavior), since
+                constructing a live OI engine requires broker credentials
+                this loop must not assume are configured.
             strategy_evaluation_engine: Defaults to a fresh engine bound
                 to ``strategy_registry``.
             trade_decision_engine: Defaults to a fresh engine with
@@ -451,6 +472,7 @@ class AIDecisionLoop:
 
             regime_engine = MarketRegimeEngine()
         self._regime_engine = regime_engine
+        self._oi_engine = oi_engine
 
         self._strategy_evaluation_engine = strategy_evaluation_engine or (
             StrategyEvaluationEngine(StrategyEvaluationEngineConfig(), strategy_registry)
@@ -761,8 +783,34 @@ class AIDecisionLoop:
             **base_kwargs,
         )
 
+    def _run_oi_cycle(self) -> Mapping[str, Any] | None:
+        """Run one live OI cycle defensively and return its chain analysis.
+
+        Returns ``None`` (never raises) when no OI engine is configured, the
+        cycle could not produce a comparable pair yet (e.g. first run), or
+        the OI engine fails — matching :meth:`_analyze_regime`'s treatment
+        of regime analysis as advisory input, never a hard dependency.
+        """
+        if self._oi_engine is None:
+            return None
+        try:
+            result = self._oi_engine.run_cycle()
+        except Exception:  # noqa: BLE001 - OI input is advisory, never fatal
+            _LOGGER.exception("ai_decision_loop.oi_cycle.failed")
+            return None
+        if not isinstance(result, Mapping) or not result.get("analysis_ready"):
+            return None
+        chain_analysis = result.get("chain_analysis")
+        return chain_analysis if isinstance(chain_analysis, Mapping) else None
+
     def _analyze_regime(self) -> tuple[str, str, dict[str, str]]:
         """Run regime analysis defensively; never blocks the cycle on failure.
+
+        Feeds the existing live OI engine's :meth:`oi_engine.OIEngine.analyze_chain`
+        output (via :meth:`_run_oi_cycle`) into
+        ``regime_engine.analyze(oi_analysis=...)`` so the already-implemented
+        OI intelligence participates in regime scoring, without this loop
+        reimplementing any OI or regime logic itself.
 
         Returns:
             ``(regime_label, regime_confidence_band, tags)`` where ``tags``
@@ -770,8 +818,9 @@ class AIDecisionLoop:
             regime output is threaded into strategy evaluation without
             altering its input contract.
         """
+        oi_analysis = self._run_oi_cycle()
         try:
-            result = self._regime_engine.analyze()
+            result = self._regime_engine.analyze(oi_analysis=oi_analysis)
         except Exception:  # noqa: BLE001 - regime is advisory, never fatal
             _LOGGER.exception("ai_decision_loop.regime.failed")
             return PLACEHOLDER, PLACEHOLDER, {}
@@ -915,6 +964,7 @@ __all__ = [
     "DashboardDecisionLoopStatus",
     "SnapshotProvider",
     "RegimeAnalyzer",
+    "OIAnalyzer",
     "AIDecisionLoop",
     "build_dashboard_decision_loop_status",
 ]
