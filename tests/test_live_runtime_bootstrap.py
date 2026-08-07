@@ -8,7 +8,11 @@ from types import MappingProxyType
 import pytest
 
 from broker.base_broker import Exchange, InstrumentRequest
-from broker.instrument_loader import InstrumentLoader, default_instrument_loader_config
+from broker.instrument_loader import (
+    InstrumentLoader,
+    InstrumentLoaderConfig,
+    default_instrument_loader_config,
+)
 from broker.kite_authentication import (
     EnvironmentProfile,
     KiteAuthenticationConfig,
@@ -20,7 +24,9 @@ from broker.market_data_streaming import InstrumentRole
 from dashboard.live_session_adapter import clear_live_handles, get_registered_live_handles
 from system.live_runtime_bootstrap import (
     _KiteInstrumentMasterClient,
+    _index_and_volatility_descriptors,
     _nearest_expiry_option_descriptors,
+    _with_index_lot_size_patched,
     bootstrap_live_runtime,
 )
 from tests.test_instrument_loader import row
@@ -36,8 +42,8 @@ def _clean_dashboard_handles():
     clear_live_handles()
 
 
-def _build_catalog(rows_list):
-    loader = InstrumentLoader(default_instrument_loader_config(enabled_underlyings=("NIFTY",)))
+def _build_catalog(rows_list, *, enabled_underlyings=("NIFTY",)):
+    loader = InstrumentLoader(default_instrument_loader_config(enabled_underlyings=enabled_underlyings))
     return loader.load_from_rows(rows_list)
 
 
@@ -89,11 +95,128 @@ class TestKiteInstrumentMasterClient:
         assert calls[0].exchange is Exchange.NFO
 
 
+_REAL_NSE_INDEX_ROWS = [
+    {
+        "instrument_token": "256265", "exchange_token": "1001", "tradingsymbol": "NIFTY 50",
+        "name": "NIFTY 50", "expiry": "", "strike": "", "tick_size": "0.05", "lot_size": "0",
+        "instrument_type": "EQ", "segment": "INDICES", "exchange": "NSE",
+    },
+    {
+        "instrument_token": "260105", "exchange_token": "1016", "tradingsymbol": "NIFTY BANK",
+        "name": "NIFTY BANK", "expiry": "", "strike": "", "tick_size": "0.05", "lot_size": "0",
+        "instrument_type": "EQ", "segment": "INDICES", "exchange": "NSE",
+    },
+    {
+        "instrument_token": "264969", "exchange_token": "1035", "tradingsymbol": "INDIA VIX",
+        "name": "INDIA VIX", "expiry": "", "strike": "", "tick_size": "0.05", "lot_size": "0",
+        "instrument_type": "EQ", "segment": "INDICES", "exchange": "NSE",
+    },
+    {
+        "instrument_token": "999999", "exchange_token": "999", "tradingsymbol": "NIFTY 500",
+        "name": "NIFTY 500", "expiry": "", "strike": "", "tick_size": "0.05", "lot_size": "0",
+        "instrument_type": "EQ", "segment": "INDICES", "exchange": "NSE",
+    },
+]
+
+
+class TestIndexLotSizePatch:
+    """Real Zerodha NSE index rows report lot_size=0 and get silently
+    dropped by InstrumentLoader's own validation without this patch."""
+
+    def test_patches_lot_size_only_for_the_three_target_symbols(self) -> None:
+        patched = _with_index_lot_size_patched(_REAL_NSE_INDEX_ROWS)
+
+        by_symbol = {row["tradingsymbol"]: row for row in patched}
+        assert by_symbol["NIFTY 50"]["lot_size"] == 1
+        assert by_symbol["NIFTY BANK"]["lot_size"] == 1
+        assert by_symbol["INDIA VIX"]["lot_size"] == 1
+        # NIFTY 500 is not one of the three symbols the dashboard reads —
+        # left untouched, proving the patch is narrowly targeted.
+        assert by_symbol["NIFTY 500"]["lot_size"] == "0"
+
+    def test_does_not_mutate_the_input_rows(self) -> None:
+        original = [dict(row) for row in _REAL_NSE_INDEX_ROWS]
+
+        _with_index_lot_size_patched(_REAL_NSE_INDEX_ROWS)
+
+        assert _REAL_NSE_INDEX_ROWS == original
+
+    def test_does_not_override_a_real_nonzero_lot_size(self) -> None:
+        rows = [dict(_REAL_NSE_INDEX_ROWS[0])]
+        rows[0]["lot_size"] = "5"
+
+        patched = _with_index_lot_size_patched(rows)
+
+        assert patched[0]["lot_size"] == "5"
+
+
+class TestIndexAndVolatilityDescriptors:
+    def test_builds_spot_and_volatility_descriptors_with_correct_roles(self) -> None:
+        loader = InstrumentLoader(
+            InstrumentLoaderConfig(
+                enabled_underlyings=("NIFTY", "BANKNIFTY"),
+                environment_profile=EnvironmentProfile.PAPER,
+                cache_enabled=False,
+                volatility_index_map={"NIFTY": "INDIA VIX"},
+            )
+        )
+        catalog = loader.load_from_rows(_with_index_lot_size_patched(_REAL_NSE_INDEX_ROWS))
+
+        descriptors = _index_and_volatility_descriptors(
+            catalog, spot_underlyings=("NIFTY", "BANKNIFTY"), volatility_underlying="NIFTY"
+        )
+
+        by_symbol = {d.tradingsymbol: d for d in descriptors}
+        assert set(by_symbol) == {"NIFTY 50", "NIFTY BANK", "INDIA VIX"}
+        assert by_symbol["NIFTY 50"].underlying == "NIFTY"
+        assert by_symbol["NIFTY 50"].instrument_role is InstrumentRole.SPOT
+        assert by_symbol["NIFTY BANK"].underlying == "BANKNIFTY"
+        assert by_symbol["NIFTY BANK"].instrument_role is InstrumentRole.SPOT
+        assert by_symbol["INDIA VIX"].underlying == "NIFTY"
+        assert by_symbol["INDIA VIX"].instrument_role is InstrumentRole.VOLATILITY_INDEX
+
+    def test_omits_spot_symbols_not_in_spot_underlyings(self) -> None:
+        loader = InstrumentLoader(
+            InstrumentLoaderConfig(
+                enabled_underlyings=("NIFTY",),
+                environment_profile=EnvironmentProfile.PAPER,
+                cache_enabled=False,
+                volatility_index_map={"NIFTY": "INDIA VIX"},
+            )
+        )
+        catalog = loader.load_from_rows(
+            _with_index_lot_size_patched(
+                [r for r in _REAL_NSE_INDEX_ROWS if r["tradingsymbol"] != "NIFTY BANK"]
+            )
+        )
+
+        descriptors = _index_and_volatility_descriptors(
+            catalog, spot_underlyings=("NIFTY",), volatility_underlying="NIFTY"
+        )
+
+        assert {d.tradingsymbol for d in descriptors} == {"NIFTY 50", "INDIA VIX"}
+
+
+def _disabled_persistence_authenticator_factory(config, **kwargs):
+    """Force TokenPersistenceMode.DISABLED so these tests never accidentally
+    restore a real session left on disk at the shared default token store
+    path (broker/kite_authentication.py's DEFAULT_STORE_PATH) by an actual
+    live run elsewhere on this machine — env={} alone does not isolate
+    file-backed persistence, only credential resolution."""
+    from dataclasses import replace as _replace
+
+    return KiteAuthenticator(_replace(config, persistence_mode=TokenPersistenceMode.DISABLED), **kwargs)
+
+
 class TestBootstrapGracefulDegradation:
     """No credentials/network available: every later-stage component still starts."""
 
     def test_bootstrap_never_crashes_and_degrades_honestly(self) -> None:
-        handles = bootstrap_live_runtime(env={}, ai_loop_interval_seconds=100.0)
+        handles = bootstrap_live_runtime(
+            env={},
+            authenticator_factory=_disabled_persistence_authenticator_factory,
+            ai_loop_interval_seconds=100.0,
+        )
         try:
             status = handles.status
             assert status.authenticated is False
@@ -113,7 +236,11 @@ class TestBootstrapGracefulDegradation:
             handles.stop()
 
     def test_summary_lines_mark_every_stage(self) -> None:
-        handles = bootstrap_live_runtime(env={}, ai_loop_interval_seconds=100.0)
+        handles = bootstrap_live_runtime(
+            env={},
+            authenticator_factory=_disabled_persistence_authenticator_factory,
+            ai_loop_interval_seconds=100.0,
+        )
         try:
             lines = handles.status.summary_lines()
             assert len(lines) == 8
@@ -148,36 +275,67 @@ class TestBootstrapFullSuccess:
         )
 
         fake_ticker = FakeKiteTicker("api-key-123456", "fake-access-token")
-        real_ws_client, _ = make_client(underlyings=("NIFTY",), ticker=fake_ticker)
+        real_ws_client, _ = make_client(underlyings=("NIFTY", "BANKNIFTY"), ticker=fake_ticker)
 
-        rows_list = [
-            row(1, "INDEX", "NIFTY 50", name="NIFTY", lot="1"),
+        option_rows = [
             row(10, "CE", "NIFTY24500CE", expiry="2026-08-07", strike="24500"),
             row(11, "PE", "NIFTY24500PE", expiry="2026-08-07", strike="24500"),
+            row(20, "CE", "BANKNIFTY52000CE", name="BANKNIFTY", expiry="2026-08-07", strike="52000"),
+            row(21, "PE", "BANKNIFTY52000PE", name="BANKNIFTY", expiry="2026-08-07", strike="52000"),
         ]
-        catalog = _build_catalog(rows_list)
+        option_catalog = _build_catalog(option_rows, enabled_underlyings=("NIFTY", "BANKNIFTY"))
+
+        # Real Zerodha NSE index rows: instrument_type="EQ", lot_size=0.
+        index_rows = [
+            {
+                "instrument_token": "256265", "exchange_token": "1001", "tradingsymbol": "NIFTY 50",
+                "name": "NIFTY 50", "expiry": "", "strike": "", "tick_size": "0.05", "lot_size": "0",
+                "instrument_type": "EQ", "segment": "INDICES", "exchange": "NSE",
+            },
+            {
+                "instrument_token": "260105", "exchange_token": "1016", "tradingsymbol": "NIFTY BANK",
+                "name": "NIFTY BANK", "expiry": "", "strike": "", "tick_size": "0.05", "lot_size": "0",
+                "instrument_type": "EQ", "segment": "INDICES", "exchange": "NSE",
+            },
+            {
+                "instrument_token": "264969", "exchange_token": "1035", "tradingsymbol": "INDIA VIX",
+                "name": "INDIA VIX", "expiry": "", "strike": "", "tick_size": "0.05", "lot_size": "0",
+                "instrument_type": "EQ", "segment": "INDICES", "exchange": "NSE",
+            },
+        ]
 
         class _StubInstrumentLoader:
+            def __init__(self, config, *, master_client=None):
+                self._config = config
+
             def load_from_broker(self, *, exchanges):
-                return catalog
+                return option_catalog
+
+            def load_from_rows(self, rows, **kwargs):
+                real_loader = InstrumentLoader(self._config)
+                return real_loader.load_from_rows(rows, **kwargs)
 
         class _StubBrokerClient:
             def connect(self) -> None:
                 pass
+
+            def fetch_instruments(self, request):
+                return tuple(index_rows)
 
         handles = bootstrap_live_runtime(
             underlying="NIFTY",
             authenticator_factory=lambda config, **kwargs: real_authenticator,
             ws_client_factory=lambda config, **kwargs: real_ws_client,
             broker_client_factory=lambda session: _StubBrokerClient(),
-            instrument_loader_factory=lambda config, **kwargs: _StubInstrumentLoader(),
+            instrument_loader_factory=lambda config, **kwargs: _StubInstrumentLoader(config, **kwargs),
             ai_loop_interval_seconds=100.0,
         )
         try:
             status = handles.status
             assert status.authenticated is True, status.authentication_note
             assert status.websocket_connected is True, status.websocket_note
-            assert status.instruments_loaded == 2, status.instruments_note
+            # 4 option contracts (NIFTY + BANKNIFTY) + 3 index/VIX instruments.
+            assert status.instruments_loaded == 7, status.instruments_note
             assert status.bridge_running is True, status.bridge_note
             assert status.streaming_running is True
             assert status.ai_loop_running is True

@@ -37,9 +37,10 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
+from typing import Final
 
 from broker.base_broker import BrokerSession, Exchange, InstrumentRequest
 from broker.instrument_loader import (
@@ -59,6 +60,7 @@ from broker.kite_websocket import KiteWebSocketClient, KiteWebSocketConfig, WebS
 from broker.market_data_bridge import WebSocketMarketDataBridge
 from broker.market_data_streaming import (
     InstrumentDescriptor,
+    InstrumentRole,
     MarketDataStreamingConfig,
     MarketDataStreamingEngine,
     resolve_instrument_role,
@@ -98,6 +100,108 @@ class _KiteInstrumentMasterClient:
     def fetch_instrument_rows(self, *, exchange: str):
         request = InstrumentRequest(exchange=Exchange(exchange.lower()))
         return self._broker_client.fetch_instruments(request)
+
+
+# Real Zerodha NSE tradingsymbols for the index/volatility instruments the
+# dashboard's Home page reads prices from. SENSEX is intentionally excluded
+# (its spot/option instruments trade on BSE/BFO, not NSE/NFO — out of the
+# currently required scope).
+_INDEX_SPOT_TRADINGSYMBOLS: Final[dict[str, str]] = {
+    "NIFTY 50": "NIFTY",
+    "NIFTY BANK": "BANKNIFTY",
+}
+_VOLATILITY_INDEX_TRADINGSYMBOL: Final[str] = "INDIA VIX"
+_ZERO_LOT_INDEX_TRADINGSYMBOLS: Final[frozenset[str]] = frozenset(
+    set(_INDEX_SPOT_TRADINGSYMBOLS) | {_VOLATILITY_INDEX_TRADINGSYMBOL}
+)
+
+
+def _with_index_lot_size_patched(
+    rows: Sequence[Mapping[str, object]]
+) -> list[dict[str, object]]:
+    """Patch lot_size and tick_size for the NIFTY 50 / NIFTY BANK / INDIA VIX rows only.
+
+    Zerodha's real NSE instrument dump reports ``lot_size=0`` AND
+    ``tick_size=0.0`` for these three rows — they are index/volatility
+    reference instruments, never tradable contracts, so the broker never
+    assigns them a lot or tick size. ``InstrumentLoader._normalize_record``
+    (broker/instrument_loader.py) requires ``lot_size >= 1`` and
+    ``tick_size > 0`` and silently drops any row that fails either check,
+    which otherwise empties the catalog of the exact three rows the
+    dashboard's live index tickers read. Patched values are never used for
+    order sizing or pricing — these descriptors are display-only SPOT/
+    VOLATILITY_INDEX quotes, never option legs.
+    """
+    patched: list[dict[str, object]] = []
+    for row in rows:
+        row = dict(row)
+        symbol = str(row.get("tradingsymbol", "")).strip()
+        if symbol in _ZERO_LOT_INDEX_TRADINGSYMBOLS:
+            lot_size = row.get("lot_size")
+            tick_size = row.get("tick_size")
+            # Real broker responses give these as numeric 0/0.0; some
+            # raw/CSV or test-fixture sources give them as strings ("0") —
+            # a plain falsy check misses the string form, since "0" is
+            # truthy in Python.
+            if lot_size in (None, "", 0, "0", 0.0):
+                row["lot_size"] = 1
+            if tick_size in (None, "", 0, "0", 0.0):
+                row["tick_size"] = 0.05
+        patched.append(row)
+    return patched
+
+
+def _index_and_volatility_descriptors(
+    catalog: InstrumentCatalog,
+    *,
+    spot_underlyings: Sequence[str],
+    volatility_underlying: str,
+) -> tuple[InstrumentDescriptor, ...]:
+    """Build SPOT (index) and VOLATILITY_INDEX descriptors from a real NSE catalog.
+
+    Real Zerodha rows for these symbols carry ``instrument_type="EQ"`` (not
+    ``"INDEX"``), so ``instrument_role`` is set explicitly here rather than
+    re-derived from ``instrument_type`` — the same reasoning
+    ``_nearest_expiry_option_descriptors`` already applies for CE/PE legs.
+    INDIA VIX attaches to ``volatility_underlying`` (the primary trading
+    underlying's own snapshot): ``MarketDataStreamingEngine`` has no
+    separate "INDIA VIX" underlying slot — matching this codebase's own
+    test fixtures, which already embed a ``VolatilitySnapshot`` inside the
+    NIFTY ``MarketSnapshot`` rather than giving VIX its own snapshot.
+    """
+    wanted_spot = {
+        symbol: canonical
+        for symbol, canonical in _INDEX_SPOT_TRADINGSYMBOLS.items()
+        if canonical in spot_underlyings
+    }
+    descriptors: list[InstrumentDescriptor] = []
+    for record in catalog.records:
+        symbol = record.tradingsymbol.strip()
+        if symbol in wanted_spot:
+            descriptors.append(
+                InstrumentDescriptor(
+                    instrument_token=record.instrument_token,
+                    underlying=wanted_spot[symbol],
+                    quote_key=record.quote_key,
+                    exchange=record.exchange,
+                    tradingsymbol=record.tradingsymbol,
+                    instrument_kind="INDEX",
+                    instrument_role=InstrumentRole.SPOT,
+                )
+            )
+        elif symbol == _VOLATILITY_INDEX_TRADINGSYMBOL:
+            descriptors.append(
+                InstrumentDescriptor(
+                    instrument_token=record.instrument_token,
+                    underlying=volatility_underlying,
+                    quote_key=record.quote_key,
+                    exchange=record.exchange,
+                    tradingsymbol=record.tradingsymbol,
+                    instrument_kind="VIX",
+                    instrument_role=InstrumentRole.VOLATILITY_INDEX,
+                )
+            )
+    return tuple(descriptors)
 
 
 def _nearest_expiry_option_descriptors(
@@ -247,6 +351,7 @@ class LiveRuntimeHandles:
 def bootstrap_live_runtime(
     *,
     underlying: str = "NIFTY",
+    market_data_underlyings: tuple[str, ...] | None = None,
     environment_profile: EnvironmentProfile = EnvironmentProfile.PAPER,
     env: dict[str, str] | None = None,
     authenticator_factory: Callable[[KiteAuthenticationConfig], KiteAuthenticator] | None = None,
@@ -264,7 +369,12 @@ def bootstrap_live_runtime(
     stages that do not strictly require it still start in degraded mode.
 
     Args:
-        underlying: Underlying to trade (index name, e.g. ``"NIFTY"``).
+        underlying: Underlying to trade (index name, e.g. ``"NIFTY"``). Also
+            the underlying INDIA VIX's snapshot attaches to.
+        market_data_underlyings: Underlyings to subscribe live market data
+            for, beyond ``underlying`` (which is always included) — this is
+            display/dashboard scope, independent of which underlying
+            ``AIDecisionLoop`` trades. Defaults to adding ``"BANKNIFTY"``.
         environment_profile: Auth/websocket/streaming environment profile.
         env: Optional environment mapping override (defaults to
             ``os.environ``) — used only to read already-configured legacy
@@ -286,6 +396,11 @@ def bootstrap_live_runtime(
     status = LiveRuntimeStatus()
     handles = LiveRuntimeHandles(status=status)
     env_map = env if env is not None else dict(os.environ)
+    # Market-data (display) scope: always includes the trading underlying,
+    # plus BANKNIFTY by default, de-duplicated and order-preserving.
+    market_underlyings = tuple(
+        dict.fromkeys((underlying,) + (market_data_underlyings or ("BANKNIFTY",)))
+    )
 
     # 1 + 2. Login Zerodha / restore session.
     auth_config = default_kite_authentication_config(environment_profile)
@@ -316,7 +431,9 @@ def bootstrap_live_runtime(
     if handles.broker_session is not None:
         try:
             ws_config = KiteWebSocketConfig(
-                environment_profile=environment_profile, enabled_underlyings=(underlying,)
+                environment_profile=environment_profile,
+                enabled_underlyings=market_underlyings,
+                max_subscriptions=1000,
             )
             credentials = handles.broker_session.credentials
             ws_client = (ws_client_factory or KiteWebSocketClient)(
@@ -348,18 +465,46 @@ def bootstrap_live_runtime(
                 handles.broker_session
             )
             broker_client.connect()
-            loader_config = default_instrument_loader_config(
-                environment_profile, enabled_underlyings=(underlying,)
+            master_client = _KiteInstrumentMasterClient(broker_client)
+            loader_config = replace(
+                default_instrument_loader_config(
+                    environment_profile, enabled_underlyings=market_underlyings
+                ),
+                # Without this, INDIA VIX's real row (instrument_type="EQ",
+                # name="INDIA VIX") normalizes to an "INDIA VIX" underlying
+                # that isn't in enabled_underlyings and gets silently
+                # dropped by InstrumentLoader's own validation — this makes
+                # it survive as a VOLATILITY_INDEX role attached to
+                # `underlying` instead (see _index_and_volatility_descriptors).
+                volatility_index_map={underlying: _VOLATILITY_INDEX_TRADINGSYMBOL},
             )
             loader = (instrument_loader_factory or InstrumentLoader)(
-                loader_config, master_client=_KiteInstrumentMasterClient(broker_client)
+                loader_config, master_client=master_client
             )
-            catalog = loader.load_from_broker(exchanges=(Exchange.NFO.value,))
-            descriptors = _nearest_expiry_option_descriptors(catalog, underlying=underlying)
+            option_catalog = loader.load_from_broker(exchanges=(Exchange.NFO.value,))
+            option_descriptors = tuple(
+                descriptor
+                for market_underlying in market_underlyings
+                for descriptor in _nearest_expiry_option_descriptors(
+                    option_catalog, underlying=market_underlying
+                )
+            )
+            index_rows = _with_index_lot_size_patched(
+                master_client.fetch_instrument_rows(exchange=Exchange.NSE.value)
+            )
+            index_catalog = loader.load_from_rows(index_rows)
+            index_descriptors = _index_and_volatility_descriptors(
+                index_catalog,
+                spot_underlyings=market_underlyings,
+                volatility_underlying=underlying,
+            )
+            descriptors = option_descriptors + index_descriptors
             status.instruments_loaded = len(descriptors)
             status.instruments_note = (
-                f"{len(descriptors)} contracts (nearest expiry)" if descriptors
-                else "0 contracts resolved for nearest expiry"
+                f"{len(option_descriptors)} option contracts + "
+                f"{len(index_descriptors)} index/VIX instruments"
+                if descriptors
+                else "0 instruments resolved"
             )
         except (InstrumentLoaderError, Exception) as exc:  # noqa: BLE001
             status.instruments_note = f"failed: {exc}"
@@ -369,7 +514,9 @@ def bootstrap_live_runtime(
 
     # 5. Start MarketDataStreamingEngine (does not require live credentials to construct/start).
     streaming_engine = MarketDataStreamingEngine(
-        MarketDataStreamingConfig(enabled_underlyings=(underlying,), environment_profile=environment_profile)
+        MarketDataStreamingConfig(
+            enabled_underlyings=market_underlyings, environment_profile=environment_profile
+        )
     )
     handles.streaming_engine = streaming_engine
     try:
