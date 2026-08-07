@@ -313,6 +313,7 @@ class AuthenticationHealthReport:
     last_error_message: str | None
     session_fingerprint: str | None
     issues: tuple[AuthenticationHealthIssue, ...]
+    last_validated_at: datetime | None = None
     metadata: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
 
@@ -972,6 +973,7 @@ class KiteAuthenticator:
         self._login_url_issued = False
         self._last_error_code: str | None = None
         self._last_error_message: str | None = None
+        self._last_validated_at: datetime | None = None
         self._credential_source = CredentialSource.UNAVAILABLE
         resolved = self._resolve_credentials()
         self._api_key = resolved.api_key
@@ -1098,6 +1100,11 @@ class KiteAuthenticator:
             access_token=access_token,
             source=source,
         )
+
+    @property
+    def config(self) -> KiteAuthenticationConfig:
+        """Return the immutable authentication configuration."""
+        return self._config
 
     def get_status(self) -> AuthenticationStatus:
         """Return current authenticator status."""
@@ -1475,6 +1482,172 @@ class KiteAuthenticator:
                 probe_performed=probe_performed,
             )
 
+    def refresh_session(
+        self,
+        *,
+        correlation_id: str | None = None,
+    ) -> AuthenticationResult:
+        """Refresh the current Kite session.
+
+        Zerodha access tokens do not support silent OAuth-style refresh —
+        a token stays valid until its end-of-day expiry (or explicit logout)
+        and can only be replaced by a fresh interactive login. "Refresh"
+        here means: (1) re-read the token store in case an external login
+        flow (e.g. an operator re-running the login script) persisted a
+        newer token than the one currently held in memory, adopting it when
+        different; otherwise (2) perform a lightweight remote profile probe
+        against the existing in-memory session to confirm it is still
+        accepted upstream and update ``last_validated_at``. Falls back to
+        :meth:`restore_session` when no in-memory session exists.
+
+        Args:
+            correlation_id: Optional correlation id.
+
+        Returns:
+            Structured authentication result.
+        """
+        started = self._clock()
+        start_perf = time.perf_counter()
+        corr = correlation_id or str(uuid.uuid4())
+        with self._lock:
+            current = self._session
+        if current is None:
+            return self.restore_session(correlation_id=corr)
+
+        try:
+            envelope = self._token_store.load()
+        except TokenPersistenceError:
+            envelope = None
+        if envelope is not None and envelope.access_token != current.access_token:
+            return self.restore_session(correlation_id=corr)
+
+        now = self._clock()
+        if self._config.fail_closed_on_expiry and is_session_expired(
+            current.expires_at,
+            now=now,
+            skew_seconds=self._config.clock_skew_seconds,
+        ):
+            with self._lock:
+                self._status = AuthenticationStatus.EXPIRED
+                self._session = None
+            return self._failure_result(
+                started=started,
+                start_perf=start_perf,
+                corr=corr,
+                exc=SessionExpiredError(
+                    "Session is expired.",
+                    code="KITE_AUTH.SESSION.EXPIRED",
+                    correlation_id=corr,
+                ),
+                token_source=TokenSource.RESTORED,
+                warnings=[],
+                metadata=None,
+                probe_performed=False,
+            )
+
+        try:
+            client = self._sdk_factory(current.api_key)
+            _user_id, _user_name, warnings = self._run_profile_probe(
+                client,
+                current.access_token,
+                user_id=current.user_id,
+                user_name=current.user_name,
+                required=True,
+            )
+        except AuthenticationError as exc:
+            return self._failure_result(
+                started=started,
+                start_perf=start_perf,
+                corr=corr,
+                exc=exc,
+                token_source=TokenSource.RESTORED,
+                warnings=[],
+                metadata=None,
+                probe_performed=True,
+            )
+
+        with self._lock:
+            self._last_validated_at = now
+            self._status = AuthenticationStatus.AUTHENTICATED
+            self._last_error_code = None
+            self._last_error_message = None
+        broker_session = project_broker_session(current)
+        completed = self._clock()
+        _LOGGER.info("kite_auth.refresh.success")
+        return AuthenticationResult(
+            result_id=str(uuid.uuid4()),
+            status=AuthenticationStatus.AUTHENTICATED,
+            session=current,
+            broker_session=broker_session,
+            metadata=self._build_metadata(
+                token_source=TokenSource.RESTORED,
+                fingerprint=current.session_fingerprint,
+                probe_performed=True,
+            ),
+            warnings=tuple(warnings),
+            errors=(),
+            started_at=started,
+            completed_at=completed,
+            duration_ms=(time.perf_counter() - start_perf) * 1000,
+            correlation_id=corr,
+        )
+
+    def auto_reconnect(
+        self,
+        *,
+        max_attempts: int = 3,
+        backoff_seconds: float = 1.0,
+        backoff_multiplier: float = 2.0,
+        sleep: Callable[[float], None] | None = None,
+        correlation_id: str | None = None,
+    ) -> AuthenticationResult:
+        """Attempt to (re)establish a healthy Kite session with bounded retries.
+
+        Repeatedly calls :meth:`refresh_session` (which itself falls back to
+        :meth:`restore_session`) up to ``max_attempts`` times with exponential
+        backoff between attempts, stopping as soon as a healthy
+        ``AUTHENTICATED``/``DEGRADED`` result is obtained. Never raises — the
+        caller inspects the returned result's ``status``. Does not issue a
+        new login URL or exchange a request token: those require an
+        interactive operator and stay out of scope for unattended
+        reconnection.
+
+        Args:
+            max_attempts: Maximum reconnect attempts (>= 1).
+            backoff_seconds: Initial delay between attempts, in seconds.
+            backoff_multiplier: Multiplier applied to the delay after each
+                failed attempt.
+            sleep: Injectable sleep function for deterministic tests;
+                defaults to :func:`time.sleep`.
+            correlation_id: Optional correlation id shared across attempts.
+
+        Returns:
+            The first healthy result, or the last failure result after
+            exhausting ``max_attempts``.
+        """
+        if max_attempts < 1:
+            raise AuthenticationError(
+                "max_attempts must be >= 1.",
+                code="KITE_AUTH.CONFIG.INVALID",
+                field="max_attempts",
+            )
+        sleeper = sleep or time.sleep
+        corr = correlation_id or str(uuid.uuid4())
+        delay = backoff_seconds
+        result: AuthenticationResult | None = None
+        for attempt in range(1, max_attempts + 1):
+            result = self.refresh_session(correlation_id=corr)
+            if result.status in {
+                AuthenticationStatus.AUTHENTICATED,
+                AuthenticationStatus.DEGRADED,
+            }:
+                return result
+            if attempt < max_attempts:
+                sleeper(delay)
+                delay *= backoff_multiplier
+        assert result is not None
+        return result
+
     def inject_access_token(
         self,
         access_token: str,
@@ -1719,8 +1892,56 @@ class KiteAuthenticator:
         """Clear the configured token store without changing in-memory status."""
         self._token_store.clear()
 
-    def get_health(self) -> AuthenticationHealthReport:
-        """Return an aggregated authentication health snapshot."""
+    def get_health(self, *, verify: bool = False) -> AuthenticationHealthReport:
+        """Return an aggregated authentication health snapshot.
+
+        Args:
+            verify: When ``True`` and an ``AUTHENTICATED``/``DEGRADED`` session
+                is present, perform a lightweight live profile probe against
+                Kite to confirm connectivity before reporting health (adds one
+                upstream API call). A token-shaped failure marks the session
+                ``EXPIRED``; defaults to ``False`` for a fast, local-only,
+                network-free status read.
+
+        Returns:
+            Aggregated health snapshot, including live-verification results
+            when ``verify=True``.
+        """
+        verify_issue: AuthenticationHealthIssue | None = None
+        if verify:
+            with self._lock:
+                probe_session = self._session
+                probe_status = self._status
+            if probe_session is not None and probe_status in {
+                AuthenticationStatus.AUTHENTICATED,
+                AuthenticationStatus.DEGRADED,
+            }:
+                try:
+                    client = self._sdk_factory(probe_session.api_key)
+                    self._run_profile_probe(
+                        client,
+                        probe_session.access_token,
+                        user_id=probe_session.user_id,
+                        user_name=probe_session.user_name,
+                        required=True,
+                    )
+                    with self._lock:
+                        self._last_validated_at = self._clock()
+                        self._last_error_code = None
+                        self._last_error_message = None
+                except AuthenticationError as exc:
+                    with self._lock:
+                        self._last_error_code = exc.code
+                        self._last_error_message = _redact_message(str(exc))
+                        if isinstance(exc, SessionExpiredError):
+                            self._status = AuthenticationStatus.EXPIRED
+                            self._session = None
+                    verify_issue = AuthenticationHealthIssue(
+                        issue_code="KITE_AUTH.HEALTH.CONNECTION_PROBE_FAILED",
+                        severity="error",
+                        message=f"Live connection probe failed: {_redact_message(str(exc))}",
+                    )
+
         with self._lock:
             status = self._status
             session = self._session
@@ -1728,6 +1949,7 @@ class KiteAuthenticator:
             has_api_secret = bool(self._api_secret)
             last_error_code = self._last_error_code
             last_error_message = self._last_error_message
+            last_validated_at = self._last_validated_at
         now = self._clock()
         has_access_token = bool(session and session.access_token)
         expires_at = session.expires_at if session else None
@@ -1781,6 +2003,8 @@ class KiteAuthenticator:
                     message="Token store is unavailable.",
                 )
             )
+        if verify_issue is not None:
+            issues.append(verify_issue)
         overall = self._derive_overall_health(
             status=status,
             has_access_token=has_access_token,
@@ -1803,6 +2027,7 @@ class KiteAuthenticator:
             last_error_message=last_error_message,
             session_fingerprint=session.session_fingerprint if session else None,
             issues=tuple(issues),
+            last_validated_at=last_validated_at,
         )
 
     def _derive_overall_health(
@@ -2300,6 +2525,9 @@ def serialize_authentication_health_report(report: AuthenticationHealthReport) -
             }
             for issue in report.issues
         ],
+        "last_validated_at": (
+            _isoformat_utc(report.last_validated_at) if report.last_validated_at else None
+        ),
         "metadata": dict(report.metadata),
     }
     return json.dumps(payload, sort_keys=True)
@@ -2350,8 +2578,191 @@ def deserialize_authentication_health_report(payload: str) -> AuthenticationHeal
             )
             for item in data.get("issues", [])
         ),
+        last_validated_at=(
+            _parse_iso_datetime(data["last_validated_at"])
+            if data.get("last_validated_at")
+            else None
+        ),
         metadata=MappingProxyType(dict(data.get("metadata", {}))),
     )
+
+
+# ---------------------------------------------------------------------------
+# Dashboard status integration
+#
+# Pure, read-only presentation mappings from authentication/session state to
+# the small duck-typed shape ``dashboard.dashboard_facade.DashboardIntegrationFacade``
+# already soft-reads from its optional ``session`` (``get_health()`` /
+# ``get_runtime_state()`` — see ``IntegrationSessionLike`` there). Kept inside
+# this module so dashboard connection/status cards can reflect real Kite
+# authentication state without importing the dashboard package here.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DashboardBrokerConnectionSnapshot:
+    """``broker_connection`` sub-object shape expected by the dashboard facade."""
+
+    state: str
+    connected: bool
+
+
+@dataclass(frozen=True)
+class DashboardSessionHealthSnapshot:
+    """``get_health()`` return shape expected by the dashboard facade."""
+
+    session_state: str
+    overall_status: str
+    broker_connection: DashboardBrokerConnectionSnapshot
+    message: str
+    market_status: str = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class DashboardRuntimeStateSnapshot:
+    """``get_runtime_state()`` return shape expected by the dashboard facade."""
+
+    execution_mode: str
+    market_status: str = "UNKNOWN"
+
+
+_DASHBOARD_SESSION_STATE_BY_AUTH_STATUS: Final[Mapping[AuthenticationStatus, str]] = {
+    AuthenticationStatus.AUTHENTICATED: "running",
+    AuthenticationStatus.DEGRADED: "degraded",
+    AuthenticationStatus.EXCHANGING: "degraded",
+    AuthenticationStatus.UNAUTHENTICATED: "stopped",
+    AuthenticationStatus.CREDENTIALS_LOADED: "stopped",
+    AuthenticationStatus.AWAITING_REQUEST_TOKEN: "stopped",
+    AuthenticationStatus.LOGGED_OUT: "stopped",
+    AuthenticationStatus.EXPIRED: "failed",
+    AuthenticationStatus.REVOKED: "failed",
+    AuthenticationStatus.FAILED: "failed",
+}
+
+_DASHBOARD_OVERALL_STATUS_BY_HEALTH: Final[Mapping[AuthHealthStatus, str]] = {
+    AuthHealthStatus.HEALTHY: "running",
+    AuthHealthStatus.DEGRADED: "degraded",
+    AuthHealthStatus.UNHEALTHY: "disconnected",
+    AuthHealthStatus.UNKNOWN: "unknown",
+}
+
+_DASHBOARD_EXECUTION_MODE_BY_PROFILE: Final[Mapping[EnvironmentProfile, str]] = {
+    EnvironmentProfile.PRODUCTION: "LIVE",
+    EnvironmentProfile.PAPER: "PAPER",
+    EnvironmentProfile.DEVELOPMENT: "ANALYSIS",
+}
+
+
+def build_dashboard_session_health(
+    report: AuthenticationHealthReport,
+    *,
+    market_status: str = "UNKNOWN",
+) -> DashboardSessionHealthSnapshot:
+    """Map an :class:`AuthenticationHealthReport` to the dashboard's health shape.
+
+    Read-only presentation mapping — never mutates authentication state and
+    never fabricates values beyond relabeling already-known status fields.
+
+    Args:
+        report: Health snapshot from :meth:`KiteAuthenticator.get_health`.
+        market_status: Optional market status label (this module has no
+            market-data visibility; defaults to ``"UNKNOWN"``).
+
+    Returns:
+        Dashboard-shaped session health snapshot.
+    """
+    session_state = _DASHBOARD_SESSION_STATE_BY_AUTH_STATUS.get(report.status, "stopped")
+    overall_status = _DASHBOARD_OVERALL_STATUS_BY_HEALTH.get(
+        report.overall_health, "unknown"
+    )
+    connected = (
+        report.has_access_token
+        and not report.is_expired
+        and report.status is AuthenticationStatus.AUTHENTICATED
+    )
+    broker_connection = DashboardBrokerConnectionSnapshot(
+        state="connected" if connected else "disconnected",
+        connected=connected,
+    )
+    message = report.last_error_message or (
+        "Kite session authenticated" if connected else "Kite session not authenticated"
+    )
+    return DashboardSessionHealthSnapshot(
+        session_state=session_state,
+        overall_status=overall_status,
+        broker_connection=broker_connection,
+        message=message,
+        market_status=market_status,
+    )
+
+
+def build_dashboard_runtime_state(
+    config: KiteAuthenticationConfig,
+    *,
+    market_status: str = "UNKNOWN",
+) -> DashboardRuntimeStateSnapshot:
+    """Map authentication config profile to the dashboard's runtime-state shape.
+
+    Args:
+        config: Active authentication configuration.
+        market_status: Optional market status label.
+
+    Returns:
+        Dashboard-shaped runtime state snapshot.
+    """
+    execution_mode = _DASHBOARD_EXECUTION_MODE_BY_PROFILE.get(
+        config.environment_profile, "ANALYSIS"
+    )
+    return DashboardRuntimeStateSnapshot(
+        execution_mode=execution_mode,
+        market_status=market_status,
+    )
+
+
+class KiteAuthDashboardSession:
+    """Adapter exposing :class:`KiteAuthenticator` status to the dashboard.
+
+    Implements the ``get_health()`` / ``get_runtime_state()`` surface that
+    ``dashboard.dashboard_facade.DashboardIntegrationFacade`` duck-types as
+    its optional ``session``. Pass an instance of this adapter as
+    ``DashboardIntegrationFacade(session=KiteAuthDashboardSession(authenticator))``
+    so dashboard connection/status cards reflect real Kite authentication
+    state. Read-only — never authenticates, refreshes, reconnects, or
+    otherwise mutates session state; callers drive the authenticator's
+    lifecycle independently (e.g. via :meth:`KiteAuthenticator.auto_reconnect`).
+    """
+
+    def __init__(
+        self,
+        authenticator: KiteAuthenticator,
+        *,
+        market_status: str = "UNKNOWN",
+        verify_connection: bool = False,
+    ) -> None:
+        """Wrap an authenticator for dashboard status reads.
+
+        Args:
+            authenticator: Live :class:`KiteAuthenticator` instance.
+            market_status: Optional market status label to surface.
+            verify_connection: When ``True``, each ``get_health()`` call
+                performs a live upstream probe (one extra Kite API call);
+                defaults to ``False`` for a purely local, low-cost read.
+        """
+        self._authenticator = authenticator
+        self._market_status = market_status
+        self._verify_connection = verify_connection
+
+    def get_health(self) -> DashboardSessionHealthSnapshot:
+        """Return the dashboard-shaped authentication health snapshot."""
+        report = self._authenticator.get_health(verify=self._verify_connection)
+        return build_dashboard_session_health(report, market_status=self._market_status)
+
+    def get_runtime_state(self) -> DashboardRuntimeStateSnapshot:
+        """Return the dashboard-shaped runtime state snapshot."""
+        return build_dashboard_runtime_state(
+            self._authenticator.config,
+            market_status=self._market_status,
+        )
 
 
 __all__ = [
@@ -2402,5 +2813,11 @@ __all__ = [
     "serialize_authentication_health_report",
     "deserialize_authentication_health_report",
     "serialize_session_metadata",
+    "DashboardBrokerConnectionSnapshot",
+    "DashboardSessionHealthSnapshot",
+    "DashboardRuntimeStateSnapshot",
+    "build_dashboard_session_health",
+    "build_dashboard_runtime_state",
+    "KiteAuthDashboardSession",
     "serialize_kite_session",
 ]

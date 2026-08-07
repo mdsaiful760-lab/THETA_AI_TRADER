@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -18,10 +19,13 @@ from broker.kite_authentication import (
     AuthenticationError,
     AuthenticationStatus,
     CredentialSource,
+    DashboardRuntimeStateSnapshot,
+    DashboardSessionHealthSnapshot,
     EnvFileTokenStore,
     ExpiryPolicyKind,
     FileTokenStore,
     InvalidCredentialError,
+    KiteAuthDashboardSession,
     KiteAuthenticationConfig,
     KiteAuthenticator,
     KiteSession,
@@ -32,6 +36,8 @@ from broker.kite_authentication import (
     TokenPersistenceMode,
     TokenSource,
     authenticate_from_request_token,
+    build_dashboard_runtime_state,
+    build_dashboard_session_health,
     compute_envelope_checksum,
     compute_next_0600_ist,
     compute_session_fingerprint,
@@ -1360,3 +1366,250 @@ class TestCoverageEdges:
         assert health.is_expired is True
         assert any(i.issue_code == "KITE_AUTH.HEALTH.TOKEN_EXPIRED" for i in health.issues)
         assert any(i.issue_code == "KITE_AUTH.HEALTH.SECRET_MISSING" for i in health.issues)
+
+
+class TestSessionRefresh:
+    """refresh_session: live re-validation and external-token adoption."""
+
+    def test_refresh_validates_live_session(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        auth.authenticate("req-refresh")
+        result = auth.refresh_session()
+        assert result.status is AuthenticationStatus.AUTHENTICATED
+        assert result.metadata.token_source is TokenSource.RESTORED
+        health = auth.get_health()
+        assert health.last_validated_at is not None
+
+    def test_refresh_without_session_falls_back_to_restore(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        result = auth.refresh_session()
+        assert result.status is AuthenticationStatus.UNAUTHENTICATED
+
+    def test_refresh_adopts_newer_token_from_store(self, tmp_path: Path) -> None:
+        auth, fake = make_auth(tmp_path)
+        first = auth.authenticate("req-a")
+        assert first.session is not None
+
+        store = FileTokenStore(tmp_path / "kite_session.json")
+        new_auth_at = fixed_clock()
+        new_expiry = new_auth_at + timedelta(hours=6)
+        draft = TokenEnvelope(
+            schema_version="1.0.0",
+            session_id="external-session",
+            api_key="api-key-123456",
+            access_token="access-external-token",
+            authenticated_at=new_auth_at,
+            expires_at=new_expiry,
+            session_fingerprint=compute_session_fingerprint(
+                session_id="external-session",
+                api_key="api-key-123456",
+                access_token="access-external-token",
+                authenticated_at=new_auth_at,
+                expires_at=new_expiry,
+                user_id=None,
+                environment_profile="development",
+            ),
+            environment_profile="development",
+            checksum="",
+        )
+        store.save(replace(draft, checksum=compute_envelope_checksum(draft)))
+
+        result = auth.refresh_session()
+        assert result.status is AuthenticationStatus.AUTHENTICATED
+        assert result.session is not None
+        assert result.session.access_token == "access-external-token"
+
+    def test_refresh_expired_session_returns_expired(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path, persistence=TokenPersistenceMode.DISABLED)
+        auth.authenticate("req-exp")
+        with auth._lock:
+            auth._session = replace(
+                auth._session,
+                expires_at=fixed_clock() - timedelta(hours=1),
+            )
+        result = auth.refresh_session()
+        assert result.status is AuthenticationStatus.EXPIRED
+        assert auth.get_session() is None
+
+    def test_refresh_probe_failure_returns_failed(self, tmp_path: Path) -> None:
+        fake = FakeKiteConnect("api-key-123456", probe_fail=True)
+        auth, _ = make_auth(tmp_path, sdk=fake, persistence=TokenPersistenceMode.DISABLED)
+        auth.authenticate("req-b")
+        result = auth.refresh_session()
+        assert result.status is AuthenticationStatus.FAILED
+
+    def test_refresh_token_probe_failure_marks_expired(self, tmp_path: Path) -> None:
+        fake = FakeKiteConnect("api-key-123456", probe_token_error=True)
+        auth, _ = make_auth(tmp_path, sdk=fake, persistence=TokenPersistenceMode.DISABLED)
+        auth.authenticate("req-c")
+        result = auth.refresh_session()
+        assert result.status is AuthenticationStatus.EXPIRED
+
+
+class TestAutoReconnect:
+    """auto_reconnect: bounded retry with exponential backoff."""
+
+    def test_reconnect_succeeds_first_attempt(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        auth.authenticate("req-ar")
+        sleeps: list[float] = []
+        result = auth.auto_reconnect(sleep=sleeps.append)
+        assert result.status is AuthenticationStatus.AUTHENTICATED
+        assert sleeps == []
+
+    def test_reconnect_exhausts_attempts_with_backoff(self, tmp_path: Path) -> None:
+        fake = FakeKiteConnect("api-key-123456", probe_fail=True)
+        auth, _ = make_auth(tmp_path, sdk=fake, persistence=TokenPersistenceMode.DISABLED)
+        auth.authenticate("req-ar2")
+        sleeps: list[float] = []
+        result = auth.auto_reconnect(
+            max_attempts=3,
+            backoff_seconds=1.0,
+            backoff_multiplier=2.0,
+            sleep=sleeps.append,
+        )
+        assert result.status is AuthenticationStatus.FAILED
+        assert sleeps == [1.0, 2.0]
+
+    def test_reconnect_invalid_max_attempts(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        with pytest.raises(AuthenticationError) as exc:
+            auth.auto_reconnect(max_attempts=0)
+        assert exc.value.code == "KITE_AUTH.CONFIG.INVALID"
+
+    def test_reconnect_restores_persisted_session_across_instances(
+        self, tmp_path: Path
+    ) -> None:
+        auth, fake = make_auth(tmp_path)
+        auth.authenticate("req-ar3")
+        auth2, _ = make_auth(tmp_path, sdk=fake)
+        result = auth2.auto_reconnect(sleep=lambda _seconds: None)
+        assert result.status is AuthenticationStatus.AUTHENTICATED
+
+
+class TestConnectionHealthVerify:
+    """get_health(verify=True): live connection probe."""
+
+    def test_verify_false_never_probes(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        auth.authenticate("req-v1")
+        health = auth.get_health()
+        assert health.last_validated_at is None
+
+    def test_verify_true_success_sets_last_validated(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        auth.authenticate("req-v2")
+        health = auth.get_health(verify=True)
+        assert health.last_validated_at is not None
+        assert health.overall_health is AuthHealthStatus.HEALTHY
+
+    def test_verify_true_token_failure_marks_expired(self, tmp_path: Path) -> None:
+        fake = FakeKiteConnect("api-key-123456", probe_token_error=True)
+        auth, _ = make_auth(tmp_path, sdk=fake, persistence=TokenPersistenceMode.DISABLED)
+        auth.authenticate("req-v3")
+        health = auth.get_health(verify=True)
+        assert health.status is AuthenticationStatus.EXPIRED
+        assert any(
+            i.issue_code == "KITE_AUTH.HEALTH.CONNECTION_PROBE_FAILED"
+            for i in health.issues
+        )
+        assert auth.get_session() is None
+
+    def test_verify_skipped_when_not_authenticated(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        health = auth.get_health(verify=True)
+        assert health.last_validated_at is None
+
+
+class TestDashboardIntegration:
+    """Dashboard status mapping and the KiteAuthDashboardSession adapter."""
+
+    def test_build_dashboard_session_health_authenticated(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        auth.authenticate("req-d1")
+        view = build_dashboard_session_health(auth.get_health())
+        assert isinstance(view, DashboardSessionHealthSnapshot)
+        assert view.session_state == "running"
+        assert view.overall_status == "running"
+        assert view.broker_connection.state == "connected"
+        assert view.broker_connection.connected is True
+
+    def test_build_dashboard_session_health_offline(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        view = build_dashboard_session_health(auth.get_health())
+        assert view.session_state == "stopped"
+        assert view.broker_connection.connected is False
+        assert view.broker_connection.state == "disconnected"
+
+    def test_build_dashboard_session_health_expired(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path, persistence=TokenPersistenceMode.DISABLED)
+        auth.authenticate("req-d2")
+        with auth._lock:
+            auth._session = replace(
+                auth._session,
+                expires_at=fixed_clock() - timedelta(hours=1),
+            )
+            auth._status = AuthenticationStatus.EXPIRED
+        view = build_dashboard_session_health(auth.get_health())
+        assert view.session_state == "failed"
+        assert view.overall_status == "disconnected"
+        assert view.broker_connection.connected is False
+
+    def test_build_dashboard_runtime_state_by_profile(self) -> None:
+        prod = default_kite_authentication_config(EnvironmentProfile.PRODUCTION)
+        paper = default_kite_authentication_config(EnvironmentProfile.PAPER)
+        dev = default_kite_authentication_config(EnvironmentProfile.DEVELOPMENT)
+        assert build_dashboard_runtime_state(prod).execution_mode == "LIVE"
+        assert build_dashboard_runtime_state(paper).execution_mode == "PAPER"
+        runtime = build_dashboard_runtime_state(dev)
+        assert isinstance(runtime, DashboardRuntimeStateSnapshot)
+        assert runtime.execution_mode == "ANALYSIS"
+
+    def test_adapter_get_health_and_runtime_state(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        auth.authenticate("req-d3")
+        adapter = KiteAuthDashboardSession(auth)
+        health = adapter.get_health()
+        assert health.session_state == "running"
+        runtime = adapter.get_runtime_state()
+        assert runtime.execution_mode == "ANALYSIS"
+
+    def test_adapter_verify_connection_triggers_probe(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        auth.authenticate("req-d4")
+        adapter = KiteAuthDashboardSession(auth, verify_connection=True)
+        health = adapter.get_health()
+        assert health.session_state == "running"
+        assert auth.get_health().last_validated_at is not None
+
+    def test_adapter_default_does_not_verify(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        auth.authenticate("req-d5")
+        adapter = KiteAuthDashboardSession(auth)
+        adapter.get_health()
+        assert auth.get_health().last_validated_at is None
+
+    def test_config_property_exposed(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        assert auth.config.environment_profile is EnvironmentProfile.DEVELOPMENT
+
+
+class TestHealthReportSerializationLastValidated:
+    """last_validated_at round-trips through (de)serialize_authentication_health_report."""
+
+    def test_round_trip_last_validated_present(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        auth.authenticate("req-ser")
+        health = auth.get_health(verify=True)
+        assert health.last_validated_at is not None
+        payload = serialize_authentication_health_report(health)
+        restored = deserialize_authentication_health_report(payload)
+        assert restored.last_validated_at == health.last_validated_at
+
+    def test_round_trip_last_validated_absent(self, tmp_path: Path) -> None:
+        auth, _ = make_auth(tmp_path)
+        health = auth.get_health()
+        assert health.last_validated_at is None
+        payload = serialize_authentication_health_report(health)
+        restored = deserialize_authentication_health_report(payload)
+        assert restored.last_validated_at is None
