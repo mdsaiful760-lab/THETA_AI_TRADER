@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,12 +22,14 @@ from broker.market_data_streaming import (
     TOPIC_SNAPSHOT_FAILED,
     TOPIC_SNAPSHOT_PUBLISHED,
     TOPIC_SNAPSHOT_SKIPPED,
+    DashboardMarketSnapshotView,
     ExpectedMoveEstimate,
     GreeksAttachment,
     InstrumentDescriptor,
     InstrumentRole,
     InstrumentValidationError,
     LatestQuoteBook,
+    MarketDataDashboardSession,
     MarketDataStreamingConfig,
     MarketDataStreamingConfigurationError,
     MarketDataStreamingEngine,
@@ -41,6 +44,7 @@ from broker.market_data_streaming import (
     TickEvent,
     TickValidationError,
     UnderlyingSupportTier,
+    build_dashboard_market_snapshot_view,
     classify_underlying_tier,
     compute_expected_move,
     default_market_data_streaming_config,
@@ -1547,3 +1551,172 @@ class TestCoverageExpansion:
         assert snap_a.option_chain.metadata.atm_strike == snap_b.option_chain.metadata.atm_strike
         assert snap_a.underlying.last_price == snap_b.underlying.last_price
         assert len(snap_a.option_chain.contracts) == len(snap_b.option_chain.contracts)
+
+
+class TestAutoRefresh:
+    """start_auto_refresh()/stop_auto_refresh(): periodic re-assembly."""
+
+    def test_invalid_interval_raises(self) -> None:
+        engine = make_engine()
+        with pytest.raises(MarketDataStreamingConfigurationError):
+            engine.start_auto_refresh(interval_seconds=0.0)
+
+    def test_idempotent_start(self) -> None:
+        engine = make_engine()
+        engine.start_auto_refresh(interval_seconds=0.05)
+        first_thread = engine._refresh_thread
+        engine.start_auto_refresh(interval_seconds=0.05)
+        second_thread = engine._refresh_thread
+        assert first_thread is second_thread
+        engine.stop_auto_refresh()
+
+    def test_stop_safe_when_never_started(self) -> None:
+        engine = make_engine()
+        engine.stop_auto_refresh()
+
+    def test_reassembles_without_new_ticks(self) -> None:
+        times = [FIXED_NOW]
+
+        def clock() -> datetime:
+            return times[0]
+
+        engine = make_engine(clock=clock)
+        register_chain(engine)
+        feed_chain(engine)
+        first = engine.get_snapshot("NIFTY")
+        assert first is not None
+
+        times[0] = FIXED_NOW + timedelta(seconds=5)
+        engine.start_auto_refresh(interval_seconds=0.01)
+        try:
+            deadline = time.time() + 2.0
+            second = None
+            while time.time() < deadline:
+                candidate = engine.get_snapshot("NIFTY")
+                if candidate is not None and candidate.provenance.as_of != first.provenance.as_of:
+                    second = candidate
+                    break
+                time.sleep(0.01)
+        finally:
+            engine.stop_auto_refresh()
+
+        assert second is not None
+        assert second.provenance.as_of == times[0]
+
+    def test_shutdown_stops_refresh_and_lifecycle(self) -> None:
+        engine = make_engine()
+        register_chain(engine)
+        feed_chain(engine)
+        engine.start_auto_refresh(interval_seconds=0.05)
+        engine.shutdown()
+        assert engine.get_status() is StreamingLifecycleState.STOPPED
+        assert engine._refresh_thread is None
+
+    def test_shutdown_safe_when_refresh_never_started(self) -> None:
+        engine = make_engine()
+        engine.shutdown()
+        assert engine.get_status() is StreamingLifecycleState.STOPPED
+
+
+class TestDashboardIntegration:
+    """Dashboard market-snapshot mapping for the streaming pipeline."""
+
+    def test_live_view_maps_spot_option_chain_and_indices(self) -> None:
+        engine = make_engine(("NIFTY", "BANKNIFTY"))
+        register_chain(engine, underlying="NIFTY", include_future=True, include_vix=True)
+        register_chain(engine, underlying="BANKNIFTY", spot_token=2001, atm=52000.0)
+        feed_chain(
+            engine,
+            underlying="NIFTY",
+            with_iv=True,
+            include_future=True,
+            include_vix=True,
+        )
+        feed_chain(
+            engine,
+            underlying="BANKNIFTY",
+            spot_token=2001,
+            spot=52010.0,
+            atm=52000.0,
+        )
+
+        view = build_dashboard_market_snapshot_view(engine, selected_underlying="NIFTY")
+        assert isinstance(view, DashboardMarketSnapshotView)
+        assert view.underlyings == ("NIFTY", "BANKNIFTY")
+        assert view.selected_underlying == "NIFTY"
+        assert view.ltp == "24512.00"
+        assert view.option_chain_columns == (
+            "strike",
+            "type",
+            "ltp",
+            "oi",
+            "iv",
+            "delta",
+        )
+        assert len(view.option_chain_rows) == 4
+        assert view.indices["NIFTY"].last_price == 24512.0
+        assert view.indices["BANKNIFTY"].last_price == 52010.0
+        assert "INDIA VIX" in view.indices
+        assert view.indices["INDIA VIX"].last_price == 13.5
+
+    def test_offline_view_is_placeholders(self) -> None:
+        engine = make_engine()
+        view = build_dashboard_market_snapshot_view(engine, selected_underlying="NIFTY")
+        assert view.ltp == "—"
+        assert view.change == "—"
+        assert view.volume == "—"
+        assert view.option_chain_rows == ()
+        assert view.indices == {}
+
+    def test_selected_underlying_falls_back_when_not_enabled(self) -> None:
+        engine = make_engine(("NIFTY",))
+        view = build_dashboard_market_snapshot_view(engine, selected_underlying="BANKNIFTY")
+        assert view.selected_underlying == "NIFTY"
+
+    def test_option_chain_row_carries_greeks_and_iv(self) -> None:
+        engine = make_engine()
+        register_chain(engine)
+        feed_chain(engine, with_iv=True)
+        view = build_dashboard_market_snapshot_view(engine, selected_underlying="NIFTY")
+        assert any(row[4] != "—" for row in view.option_chain_rows)
+        assert any(row[5] != "—" for row in view.option_chain_rows)
+
+    def test_row_limit_is_applied(self) -> None:
+        engine = make_engine()
+        register_chain(engine)
+        feed_chain(engine)
+        view = build_dashboard_market_snapshot_view(
+            engine, selected_underlying="NIFTY", row_limit=2
+        )
+        assert len(view.option_chain_rows) == 2
+
+    def test_change_placeholder_when_not_computed_upstream(self) -> None:
+        # The streaming pipeline does not compute UnderlyingSnapshot.change
+        # (no business logic added here) — the dashboard view must show a
+        # placeholder rather than fabricate a value.
+        engine = make_engine()
+        register_chain(engine)
+        feed_chain(engine)
+        view = build_dashboard_market_snapshot_view(engine, selected_underlying="NIFTY")
+        assert view.change == "—"
+
+    def test_dashboard_session_get_market_snapshot(self) -> None:
+        engine = make_engine()
+        register_chain(engine, include_vix=True)
+        feed_chain(engine, with_iv=True, include_vix=True)
+        session = MarketDataDashboardSession(engine, selected_underlying="NIFTY")
+        view = session.get_market_snapshot()
+        assert view.selected_underlying == "NIFTY"
+        assert view.ltp == "24512.00"
+        assert "INDIA VIX" in view.indices
+
+    def test_dashboard_session_never_mutates_engine(self) -> None:
+        engine = make_engine()
+        register_chain(engine)
+        feed_chain(engine)
+        before = engine.get_statistics()
+        session = MarketDataDashboardSession(engine, selected_underlying="NIFTY")
+        session.get_market_snapshot()
+        session.get_market_snapshot()
+        after = engine.get_statistics()
+        assert before.total_tick_count == after.total_tick_count

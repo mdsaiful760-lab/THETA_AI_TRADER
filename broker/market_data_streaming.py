@@ -1599,6 +1599,9 @@ class MarketDataStreamingEngine:
         self._callbacks_lock = threading.RLock()
         self._callbacks: list[Callable[[StreamingPublishEvent], None]] = []
 
+        self._refresh_thread: threading.Thread | None = None
+        self._refresh_stop_event = threading.Event()
+
     # -- Lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
@@ -1634,6 +1637,84 @@ class MarketDataStreamingEngine:
         """Return the current lifecycle state."""
         with self._lifecycle_lock:
             return self._lifecycle_state
+
+    def start_auto_refresh(self, *, interval_seconds: float = 1.0) -> None:
+        """Start a background thread that periodically re-attempts assembly.
+
+        Assembly is otherwise purely tick-triggered (see :meth:`ingest_tick`
+        / :meth:`_maybe_assemble`): when no new tick arrives for an
+        underlying, its cached snapshot's ``freshness``/``age_seconds``
+        stay frozen at whatever they were at last assembly, even though the
+        stream may have gone silent. This periodically re-invokes
+        :meth:`_maybe_assemble` for every enabled underlying so the cached
+        snapshot and its freshness evaluation stay current against
+        wall-clock time. Reuses the exact same throttled private assembly
+        path as tick-triggered assembly (``snapshot_min_interval_seconds``
+        still applies) — no new assembly/gating logic. Idempotent — calling
+        again while a refresh thread is already running is a no-op. Runs as
+        a daemon thread; also stopped by :meth:`stop_auto_refresh` and
+        :meth:`shutdown`.
+
+        Args:
+            interval_seconds: Poll interval, in seconds (must be > 0).
+
+        Raises:
+            MarketDataStreamingConfigurationError: When ``interval_seconds``
+                is not positive.
+        """
+        if interval_seconds <= 0:
+            raise MarketDataStreamingConfigurationError(
+                "interval_seconds must be > 0.",
+                code="MDS.CONFIG.THRESHOLD_OUT_OF_RANGE",
+                field="interval_seconds",
+            )
+        with self._lifecycle_lock:
+            if self._refresh_thread is not None and self._refresh_thread.is_alive():
+                return
+            self._refresh_stop_event.clear()
+
+        def _run() -> None:
+            while not self._refresh_stop_event.wait(interval_seconds):
+                try:
+                    now = self._clock()
+                    for underlying in self._config.enabled_underlyings:
+                        self._maybe_assemble(underlying, now)
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("mds.auto_refresh.failed")
+
+        thread = threading.Thread(
+            target=_run,
+            name="market-data-streaming-auto-refresh",
+            daemon=True,
+        )
+        with self._lifecycle_lock:
+            self._refresh_thread = thread
+        thread.start()
+
+    def stop_auto_refresh(self, *, timeout: float = 2.0) -> None:
+        """Signal and join the auto-refresh thread, if running.
+
+        Safe to call when no refresh thread is running.
+
+        Args:
+            timeout: Maximum seconds to wait for the thread to exit.
+        """
+        self._refresh_stop_event.set()
+        with self._lifecycle_lock:
+            thread = self._refresh_thread
+            self._refresh_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+
+    def shutdown(self) -> None:
+        """Gracefully stop all background activity.
+
+        Stops the auto-refresh thread (if running) and transitions to
+        ``STOPPED``. Cache and history remain readable afterwards for
+        diagnostics. Safe to call multiple times.
+        """
+        self.stop_auto_refresh()
+        self.stop()
 
     # -- Registration -------------------------------------------------------
 
@@ -3155,6 +3236,187 @@ def snapshot_statistics_from_json(text: str) -> SnapshotStatistics:
     return deserialize_snapshot_statistics(payload)
 
 
+# ---------------------------------------------------------------------------
+# Dashboard status integration
+#
+# Pure, read-only presentation mapping from cached MarketSnapshot data to the
+# shape ``dashboard.dashboard_facade.DashboardIntegrationFacade`` already
+# soft-reads off its optional ``session.get_market_snapshot()`` (columns,
+# rows, selected-underlying LTP/change/volume) and, via the same object's
+# ``indices`` mapping, ``get_home_market_indices()``'s per-symbol fallback
+# path. Kept inside this module (not the dashboard package) so dashboard
+# option-chain/spot/VIX/Greeks/OI/IV cards can reflect real streaming state
+# without this module importing the dashboard package.
+# ---------------------------------------------------------------------------
+
+_DASHBOARD_INDIA_VIX_SYMBOL: Final[str] = "INDIA VIX"
+_DASHBOARD_OPTION_CHAIN_COLUMNS: Final[tuple[str, ...]] = (
+    "strike",
+    "type",
+    "ltp",
+    "oi",
+    "iv",
+    "delta",
+)
+_DASHBOARD_MISSING: Final[str] = "—"
+
+
+@dataclass(frozen=True)
+class DashboardMarketSnapshotView:
+    """Shape consumed by ``DashboardIntegrationFacade.get_market_snapshot()``
+    and (via ``indices``) its ``get_home_market_indices()`` fallback path."""
+
+    underlyings: tuple[str, ...]
+    selected_underlying: str
+    ltp: str
+    change: str
+    volume: str
+    option_chain_columns: tuple[str, ...]
+    option_chain_rows: tuple[tuple[str, ...], ...]
+    indices: Mapping[str, UnderlyingSnapshot | VolatilitySnapshot]
+
+
+def _format_dashboard_number(
+    value: float | int | None,
+    *,
+    decimals: int = 2,
+    signed: bool = False,
+) -> str:
+    """Format an already-computed numeric field for display, or a placeholder."""
+    if value is None:
+        return _DASHBOARD_MISSING
+    return f"{value:+.{decimals}f}" if signed else f"{value:.{decimals}f}"
+
+
+def _dashboard_option_chain_row(contract: OptionContractSnapshot) -> tuple[str, ...]:
+    """Map one already-computed option contract to a display row.
+
+    Read-only presentation mapping — never recomputes OI, IV, or Greeks.
+    """
+    return (
+        f"{contract.strike:g}",
+        contract.option_type.value,
+        _format_dashboard_number(contract.ltp),
+        str(contract.open_interest),
+        _format_dashboard_number(contract.iv),
+        _format_dashboard_number(contract.delta),
+    )
+
+
+def build_dashboard_market_snapshot_view(
+    engine: MarketDataStreamingEngine,
+    *,
+    selected_underlying: str,
+    row_limit: int = 50,
+) -> DashboardMarketSnapshotView:
+    """Map cached engine snapshots to the dashboard's market snapshot shape.
+
+    Read-only — calls only ``engine.get_snapshot()``/``enabled_underlyings()``
+    (already-cached reads); never ingests ticks, assembles, or mutates
+    engine state. Never fabricates values: underlyings with no cached
+    snapshot yet are simply omitted from ``indices`` and the selected-
+    underlying fields fall back to placeholders.
+
+    Args:
+        engine: Running (or stopped-but-readable) streaming engine.
+        selected_underlying: Preferred underlying for the option-chain
+            table and top-line LTP/change/volume; falls back to the first
+            enabled underlying when not enabled.
+        row_limit: Maximum option-chain rows to include.
+
+    Returns:
+        Dashboard-shaped market snapshot view.
+    """
+    underlyings = engine.enabled_underlyings()
+    normalized_selected = normalize_underlying_name(selected_underlying)
+    if normalized_selected not in underlyings and underlyings:
+        normalized_selected = underlyings[0]
+
+    snap = engine.get_snapshot(normalized_selected) if normalized_selected else None
+    if snap is not None:
+        ltp = _format_dashboard_number(snap.underlying.last_price)
+        change = _format_dashboard_number(snap.underlying.change, signed=True)
+        volume = (
+            str(snap.underlying.volume)
+            if snap.underlying.volume is not None
+            else _DASHBOARD_MISSING
+        )
+        rows = tuple(
+            _dashboard_option_chain_row(contract)
+            for contract in snap.option_chain.contracts[:row_limit]
+        )
+    else:
+        ltp = _DASHBOARD_MISSING
+        change = _DASHBOARD_MISSING
+        volume = _DASHBOARD_MISSING
+        rows = ()
+
+    indices: dict[str, UnderlyingSnapshot | VolatilitySnapshot] = {}
+    for underlying in underlyings:
+        underlying_snap = engine.get_snapshot(underlying)
+        if underlying_snap is None:
+            continue
+        indices[underlying] = underlying_snap.underlying
+        if (
+            underlying_snap.volatility is not None
+            and _DASHBOARD_INDIA_VIX_SYMBOL not in indices
+        ):
+            indices[_DASHBOARD_INDIA_VIX_SYMBOL] = underlying_snap.volatility
+
+    return DashboardMarketSnapshotView(
+        underlyings=underlyings,
+        selected_underlying=normalized_selected or selected_underlying,
+        ltp=ltp,
+        change=change,
+        volume=volume,
+        option_chain_columns=_DASHBOARD_OPTION_CHAIN_COLUMNS,
+        option_chain_rows=rows,
+        indices=MappingProxyType(indices),
+    )
+
+
+class MarketDataDashboardSession:
+    """Adapter exposing :class:`MarketDataStreamingEngine` snapshots to the
+    dashboard.
+
+    Implements the ``get_market_snapshot()`` surface that
+    ``dashboard.dashboard_facade.DashboardIntegrationFacade`` duck-types as
+    its optional ``session``. Pass an instance of this adapter (or compose
+    it alongside other session adapters) as
+    ``DashboardIntegrationFacade(session=MarketDataDashboardSession(engine))``
+    so the Market page and Home index strip reflect real option chain,
+    Greeks, IV, OI, spot, and VIX data. Read-only — never ingests ticks,
+    starts/stops the engine, or otherwise mutates engine state.
+    """
+
+    def __init__(
+        self,
+        engine: MarketDataStreamingEngine,
+        *,
+        selected_underlying: str = "NIFTY",
+        option_chain_row_limit: int = 50,
+    ) -> None:
+        """Wrap a streaming engine for dashboard snapshot reads.
+
+        Args:
+            engine: Live :class:`MarketDataStreamingEngine` instance.
+            selected_underlying: Default underlying for the option-chain
+                table and top-line LTP/change/volume.
+            option_chain_row_limit: Maximum option-chain rows to expose.
+        """
+        self._engine = engine
+        self._selected_underlying = selected_underlying
+        self._option_chain_row_limit = option_chain_row_limit
+
+    def get_market_snapshot(self) -> DashboardMarketSnapshotView:
+        """Return the dashboard-shaped market snapshot view."""
+        return build_dashboard_market_snapshot_view(
+            self._engine,
+            selected_underlying=self._selected_underlying,
+            row_limit=self._option_chain_row_limit,
+        )
+
+
 __all__ = [
     "MARKET_DATA_STREAMING_VERSION",
     "MARKET_DATA_STREAMING_SCHEMA_VERSION",
@@ -3210,6 +3472,9 @@ __all__ = [
     "SnapshotHistory",
     "MarketDataStreamingEngine",
     "StreamingSnapshotService",
+    "DashboardMarketSnapshotView",
+    "build_dashboard_market_snapshot_view",
+    "MarketDataDashboardSession",
     "resolve_instrument_role",
     "normalize_exchange_timestamp",
     "derive_atm",
