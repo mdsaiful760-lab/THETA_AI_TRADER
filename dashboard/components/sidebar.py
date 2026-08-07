@@ -18,36 +18,37 @@ from dashboard.session_state import (
 from dashboard.view_models import DashboardRenderContext
 
 # (group_label, ((page_id, display_label, icon), ...)) — group_label is
-# ``None`` for the standalone top-level "Dashboard" entry.
+# ``None`` for the standalone top-level "Dashboard" entry. Order and labels
+# match the Dashboard V3 Sprint 1 spec exactly.
 NAV_GROUPS: tuple[tuple[str | None, tuple[tuple[str, str, str], ...]], ...] = (
     (None, (("home", "Dashboard", "🏠"),)),
     (
         "Market Intelligence",
         (
             ("market_regime", "Market Regime", "🧭"),
-            ("greeks", "Greeks Intelligence", "🔬"),
-            ("liquidity", "Liquidity Analysis", "💧"),
-            ("volatility", "Volatility Surface", "📉"),
             ("option_chain", "Option Chain", "⛓️"),
-            ("heatmap", "Market Heatmap", "🔥"),
+            ("greeks", "Greeks", "🔬"),
+            ("liquidity", "Liquidity", "💧"),
+            ("volatility", "Volatility", "📉"),
+            ("heatmap", "Heatmap", "🔥"),
         ),
     ),
     (
-        "Strategy Intelligence",
+        "Strategy",
         (
             ("scanner", "Strategy Scanner", "🔍"),
             ("builder", "Strategy Builder", "🛠️"),
-            ("backtesting", "Backtesting", "⏱️"),
             ("library", "Strategy Library", "📚"),
+            ("backtesting", "Backtesting", "⏱️"),
         ),
     ),
     (
-        "Risk & Portfolio",
+        "Risk",
         (
+            ("portfolio", "Portfolio", "💼"),
             ("risk_dashboard", "Risk Dashboard", "⚠️"),
             ("position_sizing", "Position Sizing", "⚖️"),
-            ("portfolio", "Portfolio Overview", "💼"),
-            ("exposure", "Exposure Analysis", "🎯"),
+            ("exposure", "Exposure", "🎯"),
         ),
     ),
     (

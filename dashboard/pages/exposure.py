@@ -87,7 +87,7 @@ def render(ctx: DashboardRenderContext) -> None:
     Args:
         ctx: Immutable render context with facade and session handles.
     """
-    render_page_header("Exposure Analysis", "Real gross/net exposure breakdown (read-only)")
+    render_page_header("Exposure", "Real gross/net exposure breakdown (read-only)")
     if not ctx.config.enable_autorefresh:
         _render_body(ctx)
         return

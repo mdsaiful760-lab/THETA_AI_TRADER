@@ -150,6 +150,12 @@ class NullIntegrationFacade:
                 connection_status="OFFLINE",
             )
 
+    def get_websocket_status(self) -> str:
+        """Return the offline placeholder — no WebSocket attached."""
+        from dashboard.view_models import PLACEHOLDER
+
+        return PLACEHOLDER
+
     def get_ai_panel(self) -> object | None:
         """Return ``None`` — no AI decision loop attached offline."""
         return None
@@ -175,6 +181,10 @@ class NullIntegrationFacade:
 
         with self._lock:
             return DashboardOverviewView(selected_underlying=underlying, source="offline")
+
+    def get_liquidity_rows(self) -> tuple[tuple[str, ...], ...]:
+        """Return an empty liquidity table — no chain to compute from offline."""
+        return ()
 
     def get_market_snapshot(self) -> MarketPageView:
         """Return offline Market page placeholders including index cards."""

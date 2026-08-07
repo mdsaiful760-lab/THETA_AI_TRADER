@@ -10,6 +10,7 @@ import streamlit as st
 
 from dashboard import DASHBOARD_VERSION, default_dashboard_ui_config
 from dashboard.components.error_banner import render_error
+from dashboard.components.right_dock import main_and_dock_columns
 from dashboard.components.sidebar import render_sidebar
 from dashboard.components.topbar import render_topbar
 from dashboard.facade import DashboardBackendFacade
@@ -95,7 +96,8 @@ def main() -> None:
     render_topbar(
         ctx,
         indices=resolve_home_indices(ctx),
-        broker_connected=ctx.facade.get_runtime_state().broker_status == "CONNECTED",
+        broker_status=ctx.facade.get_runtime_state().broker_status,
+        websocket_status=ctx.facade.get_websocket_status(),
         alert_count=_real_alert_count(ctx),
     )
     render_sidebar(ctx)
@@ -105,13 +107,14 @@ def main() -> None:
     # refreshed here or the page resolved below would always be one click
     # behind the sidebar selection.
     ctx = replace(ctx, session=get_session_view())
-    render_error(ctx.session.last_error)
     page = resolve_page(ctx.session.active_page)
-    try:
-        page.render(ctx)
-    except Exception as exc:  # noqa: BLE001 - presentation shell must not crash
-        set_last_error(f"DASH.PAGE.RENDER_FAILED: {exc}")
-        render_error(str(exc))
+    with main_and_dock_columns() as main_col, main_col:
+        render_error(ctx.session.last_error)
+        try:
+            page.render(ctx)
+        except Exception as exc:  # noqa: BLE001 - presentation shell must not crash
+            set_last_error(f"DASH.PAGE.RENDER_FAILED: {exc}")
+            render_error(str(exc))
 
 
 if __name__ == "__main__":

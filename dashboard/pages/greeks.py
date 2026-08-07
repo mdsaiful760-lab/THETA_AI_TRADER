@@ -83,7 +83,7 @@ def render(ctx: DashboardRenderContext) -> None:
     Args:
         ctx: Immutable render context with facade and session handles.
     """
-    render_page_header("Greeks Intelligence", "Live per-contract option Greeks (read-only)")
+    render_page_header("Greeks", "Live per-contract option Greeks (read-only)")
     if not ctx.config.enable_autorefresh:
         _render_body(ctx)
         return

@@ -700,6 +700,22 @@ class DashboardLiveSessionAdapter:
             return "OFFLINE"
         return "LIVE"
 
+    def get_websocket_status(self) -> str:
+        """Return the real raw WebSocket connection status.
+
+        Reads the already-connected ``kite_websocket`` handle's own
+        ``get_status()`` — the same read ``_is_market_connected()`` already
+        performs — never opens a new connection.
+        """
+        with self._lock:
+            ws = self._handles.kite_websocket
+            if ws is None or not callable(getattr(ws, "get_status", None)):
+                return PLACEHOLDER
+            try:
+                return _display(_enum_value(ws.get_status()).upper() or None, PLACEHOLDER)
+            except Exception:  # noqa: BLE001
+                return PLACEHOLDER
+
     def _scoring_health_state(self) -> str:
         """Read scoring framework health without scoring."""
         framework = self._handles.scoring_framework

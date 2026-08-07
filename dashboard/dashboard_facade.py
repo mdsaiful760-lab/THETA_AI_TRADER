@@ -70,6 +70,11 @@ _TIMEFRAME_PRESETS: Mapping[str, tuple[str, timedelta]] = MappingProxyType(
     }
 )
 
+# Column labels for get_liquidity_rows() — order matches _compute_liquidity_rows.
+LIQUIDITY_COLUMNS: tuple[str, ...] = (
+    "Strike", "Type", "Bid", "Ask", "Spread", "Spread %", "Volume", "OI", "Liquidity",
+)
+
 # Canonical Strategy Monitor families: (family_id, display_name)
 STRATEGY_MONITOR_FAMILIES: tuple[tuple[str, str], ...] = (
     ("short_strangle", "Short Strangle"),
@@ -2091,6 +2096,67 @@ def _compute_max_pain_strike(rows: tuple[tuple[str, ...], ...]) -> float | None:
     return best_strike
 
 
+def _classify_liquidity(spread_pct: float) -> str:
+    """Deterministic liquidity classification of a real spread percentage.
+
+    Pure display-tier classification of an already-real value — same
+    treatment as the VIX Low/Moderate/High buckets on the Home overview.
+    """
+    if spread_pct <= 0.5:
+        return "Excellent"
+    if spread_pct <= 1.5:
+        return "Good"
+    if spread_pct <= 3.0:
+        return "Fair"
+    return "Poor"
+
+
+def _compute_liquidity_rows(
+    rows: tuple[tuple[str, ...], ...], placeholder: str
+) -> tuple[tuple[str, ...], ...]:
+    """Real bid-ask spread / liquidity table computed from the real option chain.
+
+    ``spread`` and ``spread_pct`` are pure arithmetic over real bid/ask
+    values already in the chain — never estimated. Rows with an unusable
+    bid/ask are dropped rather than shown with a fabricated spread.
+    """
+    columns = list(MarketPageView.option_chain_columns)
+    try:
+        idx = {
+            name: columns.index(name)
+            for name in ("strike", "type", "bid", "ask", "volume", "oi")
+        }
+    except ValueError:
+        return ()
+
+    output: list[tuple[str, ...]] = []
+    for row in rows:
+        if len(row) <= max(idx.values()):
+            continue
+        try:
+            bid = float(row[idx["bid"]])
+            ask = float(row[idx["ask"]])
+        except (ValueError, IndexError):
+            continue
+        mid = (bid + ask) / 2.0
+        spread = ask - bid
+        spread_pct = (spread / mid) * 100.0 if mid > 0 else None
+        output.append(
+            (
+                row[idx["strike"]],
+                row[idx["type"]],
+                f"{bid:.2f}",
+                f"{ask:.2f}",
+                f"{spread:.2f}",
+                f"{spread_pct:.2f}%" if spread_pct is not None else placeholder,
+                row[idx["volume"]],
+                row[idx["oi"]],
+                _classify_liquidity(spread_pct) if spread_pct is not None else placeholder,
+            )
+        )
+    return tuple(output)
+
+
 def _build_oi_buildup_rows(
     rows: tuple[tuple[str, ...], ...], placeholder: str
 ) -> tuple[tuple["OiBuildupRow", ...], tuple["OiBuildupRow", ...]]:
@@ -2245,6 +2311,17 @@ class DashboardIntegrationFacade:
         """Return market display snapshot."""
         return self._cached_get("get_market_snapshot", self._fetch_market_snapshot)
 
+    def get_websocket_status(self) -> str:
+        """Return the real raw WebSocket connection status for the top bar.
+
+        Optional capability: placeholder when the injected session doesn't
+        expose ``get_websocket_status`` (e.g. offline).
+        """
+        return self._cached_get(
+            "get_websocket_status",
+            lambda: self._try_optional("get_websocket_status") or self._config.placeholder,
+        )
+
     def get_ai_panel(self) -> object | None:
         """Return AI reasoning/countdown soft-read, or ``None`` when unavailable.
 
@@ -2300,6 +2377,15 @@ class DashboardIntegrationFacade:
         """
         cache_key = f"get_dashboard_overview:{underlying.strip().upper()}"
         return self._cached_get(cache_key, lambda: self._fetch_dashboard_overview(underlying))
+
+    def get_liquidity_rows(self) -> tuple[tuple[str, ...], ...]:
+        """Return the real bid-ask spread / liquidity table for the current chain.
+
+        Pure derived arithmetic (spread, spread %, classification) over the
+        real option chain already returned by ``get_market_snapshot()`` —
+        computed here so no page ever performs this math itself.
+        """
+        return self._cached_get("get_liquidity_rows", self._fetch_liquidity_rows)
 
     def get_home_market_indices(self) -> FacadeHomeMarketIndices:
         """Return the four Home terminal index quotes for display.
@@ -2824,6 +2910,11 @@ class DashboardIntegrationFacade:
                 position="above",
             ),
         )
+
+    def _fetch_liquidity_rows(self) -> tuple[tuple[str, ...], ...]:
+        """Build the real liquidity table from the current market snapshot."""
+        snapshot = self.get_market_snapshot()
+        return _compute_liquidity_rows(snapshot.option_chain_rows, self._config.placeholder)
 
     def _fetch_dashboard_overview(self, underlying: str) -> DashboardOverviewView:
         """Build the Home / Dashboard Overview page from real, already-fetched reads."""
@@ -4030,6 +4121,10 @@ class PresentationFacadeAdapter:
         """Expose home market indices through the presentation adapter."""
         return self._facade.get_home_market_indices()
 
+    def get_websocket_status(self) -> str:
+        """Expose the real WebSocket connection status through the adapter."""
+        return self._facade.get_websocket_status()
+
     def get_ai_panel(self) -> object | None:
         """Expose AI reasoning/countdown soft-read through the presentation adapter."""
         return self._facade.get_ai_panel()
@@ -4050,6 +4145,10 @@ class PresentationFacadeAdapter:
     def get_dashboard_overview(self, underlying: str = "NIFTY") -> DashboardOverviewView:
         """Expose the composed Home / Dashboard Overview snapshot through the adapter."""
         return self._facade.get_dashboard_overview(underlying)
+
+    def get_liquidity_rows(self) -> tuple[tuple[str, ...], ...]:
+        """Expose the real, facade-computed liquidity table through the adapter."""
+        return self._facade.get_liquidity_rows()
 
     def get_market_snapshot(self) -> MarketPageView:
         """Compose Market page view from market, indices, and regime reads."""

@@ -145,8 +145,8 @@ def render_engine_status(rows: tuple[EngineStatusRow, ...], *, overall_health: s
 def render_oi_buildup(
     calls: tuple[OiBuildupRow, ...], puts: tuple[OiBuildupRow, ...]
 ) -> None:
-    """Render the Top OI Build-up panel with CALLS/PUTS tabs."""
-    st.markdown("<div class='theta-panel-title'>Top OI Build-up</div>", unsafe_allow_html=True)
+    """Render the Option Summary panel (top real OI build-up, CALLS/PUTS tabs)."""
+    st.markdown("<div class='theta-panel-title'>Option Summary</div>", unsafe_allow_html=True)
     calls_tab, puts_tab = st.tabs(["CALLS", "PUTS"])
     columns = ["Strike", "OI", "OI Chg", "LTP", "Trend"]
     for tab, rows in ((calls_tab, calls), (puts_tab, puts)):

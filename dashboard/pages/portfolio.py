@@ -345,7 +345,7 @@ def render(ctx: DashboardRenderContext) -> None:
     Args:
         ctx: Immutable render context with facade and session handles.
     """
-    render_page_header("Portfolio Overview", "Holdings, allocation, and exposure (read-only)")
+    render_page_header("Portfolio", "Holdings, allocation, and exposure (read-only)")
     if not ctx.config.enable_autorefresh:
         _render_portfolio_body(ctx)
         return

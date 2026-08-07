@@ -48,21 +48,21 @@ class DashboardPage:
 PAGE_REGISTRY: dict[str, DashboardPage] = {
     "home": DashboardPage("home", "Dashboard", home_page.render),
     "market_regime": DashboardPage("market_regime", "Market Regime", market_regime_page.render),
-    "greeks": DashboardPage("greeks", "Greeks Intelligence", greeks_page.render),
-    "liquidity": DashboardPage("liquidity", "Liquidity Analysis", liquidity_page.render),
-    "volatility": DashboardPage("volatility", "Volatility Surface", volatility_page.render),
     "option_chain": DashboardPage("option_chain", "Option Chain", option_chain_page.render),
-    "heatmap": DashboardPage("heatmap", "Market Heatmap", heatmap_page.render),
+    "greeks": DashboardPage("greeks", "Greeks", greeks_page.render),
+    "liquidity": DashboardPage("liquidity", "Liquidity", liquidity_page.render),
+    "volatility": DashboardPage("volatility", "Volatility", volatility_page.render),
+    "heatmap": DashboardPage("heatmap", "Heatmap", heatmap_page.render),
     "scanner": DashboardPage("scanner", "Strategy Scanner", strategy_monitor_page.render),
     "builder": DashboardPage("builder", "Strategy Builder", builder_page.render),
-    "backtesting": DashboardPage("backtesting", "Backtesting", backtesting_page.render),
     "library": DashboardPage("library", "Strategy Library", library_page.render),
+    "backtesting": DashboardPage("backtesting", "Backtesting", backtesting_page.render),
+    "portfolio": DashboardPage("portfolio", "Portfolio", portfolio_page.render),
     "risk_dashboard": DashboardPage("risk_dashboard", "Risk Dashboard", risk_page.render),
     "position_sizing": DashboardPage(
         "position_sizing", "Position Sizing", position_sizing_page.render
     ),
-    "portfolio": DashboardPage("portfolio", "Portfolio Overview", portfolio_page.render),
-    "exposure": DashboardPage("exposure", "Exposure Analysis", exposure_page.render),
+    "exposure": DashboardPage("exposure", "Exposure", exposure_page.render),
     "trade_execution": DashboardPage(
         "trade_execution", "Trade Execution", paper_trading_page.render
     ),

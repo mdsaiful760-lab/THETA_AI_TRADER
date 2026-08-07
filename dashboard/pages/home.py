@@ -166,11 +166,9 @@ def _render_trend_panel(ctx: DashboardRenderContext, underlying: str) -> None:
     render_lightweight_chart(chart, height=420)
 
 
-def _render_body(ctx: DashboardRenderContext) -> None:
-    """Render the full Dashboard Overview body (re-invoked on every live refresh)."""
-    underlying = _render_header_controls(ctx)
-    overview = _resolve_overview(ctx, underlying)
-
+def _render_metrics_row(ctx: DashboardRenderContext) -> None:
+    """Render the 5-card metric row (re-invoked independently on refresh)."""
+    overview = _resolve_overview(ctx, _selected_underlying())
     render_metric_cards(
         (
             overview.market_regime,
@@ -180,6 +178,12 @@ def _render_body(ctx: DashboardRenderContext) -> None:
             overview.fii_dii,
         )
     )
+
+
+def _render_trend_breadth_engine_row(ctx: DashboardRenderContext) -> None:
+    """Render the chart/breadth/engine row (re-invoked independently on refresh)."""
+    underlying = _selected_underlying()
+    overview = _resolve_overview(ctx, underlying)
 
     col_chart, col_breadth, col_engine = st.columns([2, 1, 1])
     with col_chart, st.container(border=True, key="theta_panel_trend"):
@@ -193,6 +197,11 @@ def _render_body(ctx: DashboardRenderContext) -> None:
             render_market_breadth_placeholder()
     with col_engine, st.container(border=True, key="theta_panel_engine"):
         render_engine_status(overview.engines, overall_health=overview.engines_overall_health)
+
+
+def _render_summary_row(ctx: DashboardRenderContext) -> None:
+    """Render the option-summary/scanner/alerts row + footer (independent refresh)."""
+    overview = _resolve_overview(ctx, _selected_underlying())
 
     col_oi, col_scanner, col_alerts = st.columns(3)
     with col_oi, st.container(border=True, key="theta_panel_oi"):
@@ -213,15 +222,35 @@ def _render_body(ctx: DashboardRenderContext) -> None:
 def render(ctx: DashboardRenderContext) -> None:
     """Render the Dashboard Overview (Home) page.
 
+    Each row is its own independent live fragment so a refresh tick only
+    redraws the widgets whose data actually changed, instead of rerunning
+    the whole page (the underlying selector above them is interactive and
+    intentionally stays outside any auto-refreshing fragment).
+
     Args:
         ctx: Immutable render context with facade and session handles.
     """
     render_page_header("Dashboard Overview", "Real-time intelligence from THETA AI engines")
+    _render_header_controls(ctx)
+
     if not ctx.config.enable_autorefresh:
-        _render_body(ctx)
+        _render_metrics_row(ctx)
+        _render_trend_breadth_engine_row(ctx)
+        _render_summary_row(ctx)
         return
+
     live_fragment(
-        lambda: _render_body(ctx),
+        lambda: _render_metrics_row(ctx),
         interval_seconds=ctx.config.refresh_interval_seconds,
-        key="dashboard_overview_refresh",
+        key="dashboard_metrics_refresh",
+    )
+    live_fragment(
+        lambda: _render_trend_breadth_engine_row(ctx),
+        interval_seconds=ctx.config.refresh_interval_seconds,
+        key="dashboard_trend_refresh",
+    )
+    live_fragment(
+        lambda: _render_summary_row(ctx),
+        interval_seconds=ctx.config.refresh_interval_seconds,
+        key="dashboard_summary_refresh",
     )

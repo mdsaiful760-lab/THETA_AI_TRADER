@@ -553,6 +553,59 @@ section[data-testid="stSidebar"] div[role="radiogroup"] label {
   font-family: var(--theta-font-mono);
   color: var(--theta-muted);
   font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+/* Compact real status chips (Broker / WS / AI) in the top bar. */
+.theta-status-chip-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: nowrap;
+}
+
+.theta-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--theta-border);
+  white-space: nowrap;
+}
+
+.theta-status-chip .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.theta-status-chip.on .dot {
+  background: var(--theta-positive);
+  box-shadow: 0 0 5px rgba(46, 204, 113, 0.7);
+}
+
+.theta-status-chip.off .dot {
+  background: var(--theta-negative);
+}
+
+.theta-status-chip.unknown .dot {
+  background: var(--theta-warning);
+}
+
+.theta-status-chip-label {
+  color: var(--theta-muted);
+  text-transform: uppercase;
+}
+
+.theta-status-chip-value {
+  color: var(--theta-text);
+  font-family: var(--theta-font-mono);
 }
 
 /* ---------------------------------------------------------------------
@@ -844,4 +897,75 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
   font-size: 1.05rem;
   font-weight: 700;
   margin-bottom: 0.3rem;
+}
+
+/* ---------------------------------------------------------------------
+   Sprint 1: institutional motion — smooth hover, card elevation,
+   transitions. Kept short (120-160ms) so the terminal still feels snappy.
+   --------------------------------------------------------------------- */
+
+.theta-metric-card,
+.theta-kpi-card,
+.theta-index-card,
+div[class*="st-key-theta_panel_"] > div[data-testid="stVerticalBlock"] {
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.theta-metric-card:hover,
+.theta-kpi-card:hover,
+.theta-index-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--theta-accent);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+}
+
+div[class*="st-key-theta_panel_"]:hover > div[data-testid="stVerticalBlock"] {
+  border-color: var(--theta-border-soft) !important;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+}
+
+.theta-topbar,
+.theta-status-chip,
+.theta-live-dot,
+.theta-badge {
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.stButton > button,
+section[data-testid="stSidebar"] .stButton > button {
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease,
+    transform 120ms ease;
+}
+
+section[data-testid="stSidebar"] .stButton > button:hover {
+  transform: translateX(2px);
+}
+
+.theta-alert-row,
+.theta-engine-row {
+  transition: background-color 140ms ease;
+}
+
+.theta-alert-row:hover,
+.theta-engine-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* ---------------------------------------------------------------------
+   Sprint 1: whitespace tightening — the shell now has a real top bar and
+   a right dock column, so the page body no longer needs the original
+   generous top padding.
+   --------------------------------------------------------------------- */
+
+.main .block-container {
+  padding-top: 0.6rem;
+}
+
+div[data-testid="stVerticalBlock"] {
+  gap: 0.5rem;
+}
+
+div[class*="st-key-theta_panel_"] > div[data-testid="stVerticalBlock"] {
+  padding: 0.7rem 0.85rem;
+  gap: 0.4rem;
 }

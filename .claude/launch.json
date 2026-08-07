@@ -4,7 +4,7 @@
     {
       "name": "theta-dashboard",
       "runtimeExecutable": "venv/bin/streamlit",
-      "runtimeArgs": ["run", "dashboard/app.py", "--server.headless=true"],
+      "runtimeArgs": ["run", "dashboard_entry.py", "--server.headless=true"],
       "port": 8501
     }
   ]
