@@ -98,6 +98,8 @@ class MarketPageView:
         indices: Live index cards (NIFTY, BANKNIFTY, SENSEX, INDIA VIX).
         option_chain_columns: Option chain column headers.
         option_chain_rows: Option chain display rows.
+        atm_strike: At-the-money strike for the selected underlying, used
+            to highlight the corresponding option chain row.
     """
 
     underlyings: tuple[str, ...] = ()
@@ -114,10 +116,19 @@ class MarketPageView:
         "strike",
         "type",
         "ltp",
+        "bid",
+        "ask",
         "oi",
+        "oi_change",
+        "volume",
         "iv",
+        "delta",
+        "gamma",
+        "theta",
+        "vega",
     )
     option_chain_rows: tuple[tuple[str, ...], ...] = ()
+    atm_strike: str = PLACEHOLDER
 
 
 def market_page_statistic_cards(view: MarketPageView) -> tuple[KpiCardModel, ...]:
@@ -148,6 +159,56 @@ def market_regime_cards(view: MarketPageView) -> tuple[KpiCardModel, ...]:
         Single-item KPI tuple for market regime.
     """
     return (KpiCardModel("Market Regime", view.market_regime),)
+
+
+@dataclass(frozen=True)
+class ChartMarkerView:
+    """Single real, timestamped chart annotation.
+
+    Attributes:
+        time: ISO-8601 timestamp of the real underlying event/candle.
+        price: Real price level to anchor the marker at.
+        label: Short display text.
+        kind: Marker category (``ai_signal``, ``entry``, ``exit``, ``sl``,
+            ``target``) — only categories backed by real data are emitted.
+        position: Marker placement relative to the bar (``above``/``below``).
+    """
+
+    time: str
+    price: float
+    label: str
+    kind: str
+    position: str = "above"
+
+
+@dataclass(frozen=True)
+class MarketChartView:
+    """Real OHLCV chart series for the Market page candlestick panel.
+
+    All series are derived exclusively from real fetched candles — EMA and
+    VWAP are standard arithmetic overlays computed over real closes/volumes,
+    never estimated or backfilled. Markers are emitted only when real,
+    already-computed backend data exists for that event.
+
+    Attributes:
+        underlying: Underlying symbol this series belongs to.
+        interval: Candle granularity (e.g. ``5minute``).
+        candles: Real OHLCV rows as ``(iso_time, open, high, low, close, volume)``.
+        ema_fast: Fast EMA overlay as ``(iso_time, value)`` pairs.
+        ema_slow: Slow EMA overlay as ``(iso_time, value)`` pairs.
+        vwap: Session VWAP overlay as ``(iso_time, value)`` pairs.
+        markers: Real, timestamped chart annotations.
+        source: Payload source (``live`` / ``offline`` / ``cached``).
+    """
+
+    underlying: str = PLACEHOLDER
+    interval: str = PLACEHOLDER
+    candles: tuple[tuple[str, float, float, float, float, int], ...] = ()
+    ema_fast: tuple[tuple[str, float], ...] = ()
+    ema_slow: tuple[tuple[str, float], ...] = ()
+    vwap: tuple[tuple[str, float], ...] = ()
+    markers: tuple[ChartMarkerView, ...] = ()
+    source: str = "offline"
 
 
 @dataclass(frozen=True)
@@ -316,6 +377,7 @@ class PaperTradingPageView:
     runner_latency: str = PLACEHOLDER
     runner_last_update: str = PLACEHOLDER
     source: str = "offline"
+    roi: str = PLACEHOLDER
 
 
 def paper_trading_kpi_cards(view: PaperTradingPageView) -> tuple[KpiCardModel, ...]:
@@ -325,7 +387,7 @@ def paper_trading_kpi_cards(view: PaperTradingPageView) -> tuple[KpiCardModel, .
         view: Paper trading page snapshot.
 
     Returns:
-        Six KPI cards in display order.
+        Seven KPI cards in display order.
     """
     cash = (
         view.available_cash
@@ -339,6 +401,7 @@ def paper_trading_kpi_cards(view: PaperTradingPageView) -> tuple[KpiCardModel, .
         KpiCardModel("Today's P&L", view.todays_pnl),
         KpiCardModel("Realized P&L", view.realized_pnl),
         KpiCardModel("Unrealized P&L", view.unrealized_pnl),
+        KpiCardModel("ROI", view.roi),
     )
 
 

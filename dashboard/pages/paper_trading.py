@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 from typing import Any, Sequence
 
 import pandas as pd
@@ -15,7 +14,7 @@ from dashboard.components.kpi_cards import render_kpi_row
 from dashboard.components.page_header import render_page_header
 from dashboard.components.plotly_charts import build_drawdown, build_equity_curve
 from dashboard.facade import NullIntegrationFacade
-from dashboard.utils.polling import paper_trading_refresh_interval_ms
+from dashboard.utils.autorefresh import live_fragment
 from dashboard.view_models import (
     DashboardRenderContext,
     KpiCardModel,
@@ -689,10 +688,7 @@ def _render_paper_body(ctx: DashboardRenderContext) -> None:
 
 
 def _enable_paper_trading_autorefresh(ctx: DashboardRenderContext) -> None:
-    """Enable Paper Trading autorefresh without trading cycles.
-
-    Prefers ``streamlit-autorefresh`` for a full-script rerun. Falls back to a
-    Streamlit ``fragment(run_every=...)`` that re-renders only the page body.
+    """Live-refresh the Paper Trading body in place — never the whole page.
 
     Args:
         ctx: Immutable render context with facade and config.
@@ -700,37 +696,10 @@ def _enable_paper_trading_autorefresh(ctx: DashboardRenderContext) -> None:
     if not ctx.config.enable_paper_trading_autorefresh:
         _render_paper_body(ctx)
         return
-
-    interval_ms = paper_trading_refresh_interval_ms(ctx.config)
-    try:
-        from streamlit_autorefresh import st_autorefresh
-
-        st_autorefresh(interval=interval_ms, key="paper_trading_refresh")
-        _render_paper_body(ctx)
-        return
-    except Exception:  # noqa: BLE001 - optional dependency
-        pass
-
-    fragment = getattr(st, "fragment", None)
-    if fragment is not None:
-        seconds = float(ctx.config.paper_trading_refresh_seconds)
-
-        @fragment(run_every=timedelta(seconds=seconds))
-        def _paper_trading_fragment() -> None:
-            """Re-render Paper Trading body on the refresh interval."""
-            _render_paper_body(ctx)
-
-        _paper_trading_fragment()
-        return
-
-    _logger.warning(
-        "Paper Trading autorefresh unavailable; install streamlit-autorefresh "
-        "or use Streamlit >= 1.33 for fragment refresh"
-    )
-    _render_paper_body(ctx)
-    st.caption(
-        f"Paper trading refresh interval: {ctx.config.paper_trading_refresh_seconds:.1f}s "
-        "(install streamlit-autorefresh for automatic refresh)"
+    live_fragment(
+        lambda: _render_paper_body(ctx),
+        interval_seconds=ctx.config.paper_trading_refresh_seconds,
+        key="paper_trading_refresh",
     )
 
 

@@ -15,12 +15,14 @@ from dashboard.view_models import (
     AnalyticsPageView,
     ApmeDecisionView,
     ApmePageView,
+    ChartMarkerView,
     FacadeActionResult,
     HomeKpiView,
     HomePageView,
     IndexQuoteView,
     LogEntryView,
     LogsPageView,
+    MarketChartView,
     MarketPageView,
     OrderRowView,
     OrdersPageView,
@@ -117,7 +119,7 @@ class DashboardIntegrationFacadeConfig:
     """
 
     schema_version: str = DASHBOARD_FACADE_SCHEMA_VERSION
-    cache_ttl_seconds: float = 0.0
+    cache_ttl_seconds: float = 1.0
     log_limit_default: int = 200
     placeholder: str = "—"
     redact_secret_keys: tuple[str, ...] = DEFAULT_REDACT_SECRET_KEYS
@@ -287,6 +289,7 @@ class FacadeMarketSnapshot:
     volume: str
     option_chain_columns: tuple[str, ...]
     option_chain_rows: tuple[tuple[str, ...], ...]
+    atm_strike: str = "—"
 
 
 @dataclass(frozen=True)
@@ -384,6 +387,7 @@ class FacadePaperTradingLedger:
     runner_connection_status: str = "UNKNOWN"
     runner_latency: str = PLACEHOLDER
     runner_last_update: str = PLACEHOLDER
+    roi: str = PLACEHOLDER
 
 
 @dataclass(frozen=True)
@@ -584,8 +588,9 @@ def empty_market_snapshot(
         ltp=placeholder,
         change=placeholder,
         volume=placeholder,
-        option_chain_columns=("strike", "type", "ltp", "oi", "iv"),
+        option_chain_columns=MarketPageView.option_chain_columns,
         option_chain_rows=(),
+        atm_strike=placeholder,
     )
 
 
@@ -642,6 +647,7 @@ def market_snapshot_to_page_view(
         indices=indices,
         option_chain_columns=snap.option_chain_columns,
         option_chain_rows=snap.option_chain_rows,
+        atm_strike=snap.atm_strike,
     )
 
 
@@ -1627,6 +1633,7 @@ def paper_ledger_to_page_view(
         runner_latency=ledger.runner_latency,
         runner_last_update=ledger.runner_last_update,
         source=ledger.source,
+        roi=ledger.roi,
     )
 
 
@@ -1902,6 +1909,104 @@ def _tuple_rows(value: object) -> tuple[tuple[str, ...], ...]:
     return tuple(rows)
 
 
+def _normalize_candle_rows(
+    rows: object,
+) -> tuple[tuple[str, float, float, float, float, int], ...]:
+    """Normalize raw broker OHLCV rows into sorted, deduplicated tuples.
+
+    Purely reshapes/validates already-real broker candle rows — never
+    invents, estimates, or backfills a value. Malformed rows are dropped.
+    """
+    if not rows:
+        return ()
+    parsed: dict[datetime, tuple[datetime, float, float, float, float, int]] = {}
+    try:
+        iterator = iter(rows)  # type: ignore[arg-type]
+    except TypeError:
+        return ()
+    for row in iterator:
+        try:
+            stamp = _field(row, "date", "timestamp")
+            if isinstance(stamp, str):
+                stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if not isinstance(stamp, datetime):
+                continue
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            open_ = float(_field(row, "open"))
+            high = float(_field(row, "high"))
+            low = float(_field(row, "low"))
+            close = float(_field(row, "close"))
+            volume = int(_field(row, "volume", default=0) or 0)
+        except (TypeError, ValueError):
+            continue
+        parsed[stamp] = (stamp, open_, high, low, close, volume)
+    ordered = sorted(parsed.values(), key=lambda item: item[0])
+    return tuple((stamp.isoformat(), o, h, l, c, v) for stamp, o, h, l, c, v in ordered)
+
+
+def _compute_ema_series(
+    candles: tuple[tuple[str, float, float, float, float, int], ...],
+    *,
+    span: int,
+) -> tuple[tuple[str, float], ...]:
+    """Compute a standard exponential moving average over real closes.
+
+    Display-only charting arithmetic — never used to make a trading
+    decision.
+    """
+    if not candles:
+        return ()
+    k = 2.0 / (span + 1.0)
+    ema = candles[0][4]
+    series = [(candles[0][0], ema)]
+    for iso_time, _o, _h, _l, close, _v in candles[1:]:
+        ema = close * k + ema * (1.0 - k)
+        series.append((iso_time, ema))
+    return tuple(series)
+
+
+def _compute_vwap_series(
+    candles: tuple[tuple[str, float, float, float, float, int], ...],
+) -> tuple[tuple[str, float], ...]:
+    """Compute a running session VWAP over real typical price and volume."""
+    if not candles:
+        return ()
+    cumulative_pv = 0.0
+    cumulative_volume = 0.0
+    series: list[tuple[str, float]] = []
+    for iso_time, o, h, l, close, volume in candles:
+        typical_price = (h + l + close) / 3.0
+        cumulative_pv += typical_price * volume
+        cumulative_volume += volume
+        vwap = cumulative_pv / cumulative_volume if cumulative_volume > 0 else close
+        series.append((iso_time, vwap))
+    return tuple(series)
+
+
+def _nearest_candle(
+    candles: tuple[tuple[str, float, float, float, float, int], ...],
+    at: datetime,
+) -> tuple[str, float] | None:
+    """Return the ``(iso_time, close)`` of the real candle nearest ``at``."""
+    if not candles:
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    best: tuple[str, float] | None = None
+    best_delta: float | None = None
+    for iso_time, _o, _h, _l, close, _v in candles:
+        try:
+            stamp = datetime.fromisoformat(iso_time)
+        except ValueError:
+            continue
+        delta = abs((stamp - at).total_seconds())
+        if best_delta is None or delta < best_delta:
+            best_delta = delta
+            best = (iso_time, close)
+    return best
+
+
 def _redact_text(text: str, secret_keys: tuple[str, ...]) -> str:
     """Redact secret-like substrings from free-form text."""
     redacted = _SECRET_PATTERN.sub(r"\1\2***", text)
@@ -2003,6 +2108,25 @@ class DashboardIntegrationFacade:
     def get_market_snapshot(self) -> FacadeMarketSnapshot:
         """Return market display snapshot."""
         return self._cached_get("get_market_snapshot", self._fetch_market_snapshot)
+
+    def get_ai_panel(self) -> object | None:
+        """Return AI reasoning/countdown soft-read, or ``None`` when unavailable.
+
+        Optional capability: present only when the injected session exposes
+        ``get_ai_panel`` (e.g. a live session backed by an
+        ``ai_decision_loop`` handle). Never evaluates or runs a cycle.
+        """
+        return self._cached_get("get_ai_panel", lambda: self._try_optional("get_ai_panel"))
+
+    def get_market_chart(self, underlying: str) -> MarketChartView:
+        """Return the real candlestick/EMA/VWAP chart series for ``underlying``.
+
+        Aggregates real OHLCV candles from the injected session's optional
+        ``get_underlying_candles`` accessor when present; otherwise returns
+        offline placeholders. Never fetches broker data itself.
+        """
+        cache_key = f"get_market_chart:{underlying.strip().upper()}"
+        return self._cached_get(cache_key, lambda: self._fetch_market_chart(underlying))
 
     def get_home_market_indices(self) -> FacadeHomeMarketIndices:
         """Return the four Home terminal index quotes for display.
@@ -2421,8 +2545,76 @@ class DashboardIntegrationFacade:
             volume=_display_str(_attr(snap, "volume"), ph),
             option_chain_columns=_tuple_str(
                 _attr(snap, "option_chain_columns")
-            ) or ("strike", "type", "ltp", "oi", "iv"),
+            ) or MarketPageView.option_chain_columns,
             option_chain_rows=_tuple_rows(_attr(snap, "option_chain_rows")),
+            atm_strike=_display_str(_attr(snap, "atm_strike"), ph),
+        )
+
+    def _fetch_market_chart(self, underlying: str) -> MarketChartView:
+        """Build the real candlestick/EMA/VWAP chart series for ``underlying``."""
+        if self._session is None or not hasattr(self._session, "get_underlying_candles"):
+            return MarketChartView(underlying=underlying, source="offline")
+        try:
+            raw = self._session.get_underlying_candles(underlying)
+        except Exception:
+            self._record_upstream_error("DIF.UPSTREAM.ERROR")
+            return MarketChartView(underlying=underlying, source="offline")
+        if raw is None:
+            return MarketChartView(underlying=underlying, source="offline")
+
+        candles = _normalize_candle_rows(_attr(raw, "candles"))
+        interval = _display_str(_attr(raw, "interval"), self._config.placeholder)
+        if not candles:
+            return MarketChartView(underlying=underlying, interval=interval, source="live")
+
+        return MarketChartView(
+            underlying=underlying,
+            interval=interval,
+            candles=candles,
+            ema_fast=_compute_ema_series(candles, span=9),
+            ema_slow=_compute_ema_series(candles, span=21),
+            vwap=_compute_vwap_series(candles),
+            markers=self._build_chart_markers(underlying, candles),
+            source="live",
+        )
+
+    def _build_chart_markers(
+        self,
+        underlying: str,
+        candles: tuple[tuple[str, float, float, float, float, int], ...],
+    ) -> tuple[ChartMarkerView, ...]:
+        """Build real, timestamped markers only where real backend data exists.
+
+        Currently supports AI signal markers (a real ``trade_candidate``
+        decision cycle anchored to the underlying's own real close at the
+        nearest real candle timestamp). Entry/exit/SL/target markers are
+        intentionally omitted until the backend exposes real per-instrument
+        fill/target data — never fabricated.
+        """
+        panel = self.get_ai_panel()
+        if panel is None:
+            return ()
+        if not _attr(panel, "signal_active"):
+            return ()
+        panel_underlying = _display_str(_attr(panel, "underlying"), "")
+        if panel_underlying and panel_underlying.strip().upper() != underlying.strip().upper():
+            return ()
+        decision_at = _attr(panel, "as_of")
+        if not isinstance(decision_at, datetime):
+            return ()
+        nearest = _nearest_candle(candles, decision_at)
+        if nearest is None:
+            return ()
+        iso_time, close_price = nearest
+        strategy_id = _display_str(_attr(panel, "strategy_id"), self._config.placeholder)
+        return (
+            ChartMarkerView(
+                time=iso_time,
+                price=close_price,
+                label=f"AI Signal · {strategy_id}",
+                kind="ai_signal",
+                position="above",
+            ),
         )
 
     def _fetch_strategy_status(self) -> FacadeStrategyStatus:
@@ -2866,6 +3058,9 @@ class DashboardIntegrationFacade:
         if equity_display == ph:
             equity_display = _compose_total_equity(cash_raw, unrealized_raw, ph)
 
+        roi_raw = _field(snap, "roi")
+        roi_display = f"{roi_raw:.2f}%" if isinstance(roi_raw, (int, float)) else ph
+
         todays_raw = _field(snap, "todays_pnl", "today_pnl", "daily_pnl")
 
         orders_snap = (
@@ -2965,6 +3160,7 @@ class DashboardIntegrationFacade:
             orders=orders,
             equity_series=_tuple_pairs(_attr(snap, "equity_series")),
             drawdown_series=drawdown_series,
+            roi=roi_display,
             exposure=_format_money(exposure_raw, ph),
             open_positions_count=open_positions_count,
             closed_positions_count=closed_positions_count,
@@ -3374,15 +3570,20 @@ class PresentationFacadeAdapter:
         paper = self._facade.get_paper_positions()
         strategy = self._facade.get_strategy_status()
         indices = home_indices_to_quote_views(self._facade.get_home_market_indices())
+        # Only fall back to the top monitored family when it carries a real
+        # (non-placeholder) status — otherwise every offline family row
+        # would misleadingly read as "active".
+        top_row = strategy.strategies[0] if strategy.strategies else None
+        top_row_is_real = top_row is not None and top_row.status != "—"
         active = (
             strategy.active_strategy
             if strategy.active_strategy != "—"
-            else (strategy.strategies[0].display_name if strategy.strategies else "—")
+            else (top_row.display_name if top_row_is_real else "—")
         )
         confidence = (
             strategy.confidence_score
             if strategy.confidence_score != "—"
-            else (strategy.strategies[0].confidence if strategy.strategies else "—")
+            else (top_row.confidence if top_row_is_real else "—")
         )
         return HomePageView(
             indices=indices,
@@ -3399,6 +3600,14 @@ class PresentationFacadeAdapter:
     def get_home_market_indices(self) -> FacadeHomeMarketIndices:
         """Expose home market indices through the presentation adapter."""
         return self._facade.get_home_market_indices()
+
+    def get_ai_panel(self) -> object | None:
+        """Expose AI reasoning/countdown soft-read through the presentation adapter."""
+        return self._facade.get_ai_panel()
+
+    def get_market_chart(self, underlying: str) -> MarketChartView:
+        """Expose the real candlestick/EMA/VWAP chart series through the adapter."""
+        return self._facade.get_market_chart(underlying)
 
     def get_market_snapshot(self) -> MarketPageView:
         """Compose Market page view from market, indices, and regime reads."""

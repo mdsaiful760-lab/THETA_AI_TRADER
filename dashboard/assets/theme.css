@@ -1,18 +1,63 @@
 :root {
   --theta-bg: #0B0F14;
   --theta-surface: #121821;
+  --theta-surface-raised: #161D28;
   --theta-border: #1E2A38;
+  --theta-border-soft: #172230;
   --theta-text: #E8EEF5;
   --theta-muted: #8B9BB0;
+  --theta-muted-dim: #5E6E82;
   --theta-accent: #3D8BFF;
   --theta-positive: #2ECC71;
   --theta-negative: #E74C3C;
   --theta-warning: #F0B429;
+  --theta-font-ui: -apple-system, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+  --theta-font-mono: "SF Mono", "IBM Plex Mono", "JetBrains Mono", ui-monospace, Consolas, monospace;
 }
+
+/* ---------------------------------------------------------------------
+   Base density: Streamlit's default block-container reserves a large
+   amount of top/side padding, and the default page/section spacing is
+   built for prose, not a data-dense terminal. Trim it globally.
+   --------------------------------------------------------------------- */
 
 .stApp {
   background-color: var(--theta-bg);
   color: var(--theta-text);
+  font-family: var(--theta-font-ui);
+}
+
+.main .block-container {
+  padding-top: 1.1rem;
+  padding-bottom: 1.5rem;
+  padding-left: 1.75rem;
+  padding-right: 1.75rem;
+  max-width: 100%;
+}
+
+section[data-testid="stSidebar"] .block-container {
+  padding-top: 1rem;
+}
+
+/* Streamlit's top chrome (Deploy / menu bar) — match the dark shell
+   instead of leaving a bright white strip across an otherwise dark app. */
+header[data-testid="stHeader"] {
+  background-color: var(--theta-bg);
+  border-bottom: 1px solid var(--theta-border);
+}
+
+div[data-testid="stToolbar"] {
+  color: var(--theta-muted);
+}
+
+/* Tighten vertical rhythm between stacked elements site-wide. */
+div[data-testid="stVerticalBlock"] {
+  gap: 0.6rem;
+}
+
+hr {
+  margin: 0.6rem 0;
+  border-color: var(--theta-border);
 }
 
 section[data-testid="stSidebar"] {
@@ -20,61 +65,98 @@ section[data-testid="stSidebar"] {
   border-right: 1px solid var(--theta-border);
 }
 
+/* ---------------------------------------------------------------------
+   Typography
+   --------------------------------------------------------------------- */
+
+h1, h2, h3, h4 {
+  font-family: var(--theta-font-ui);
+  letter-spacing: -0.01em;
+}
+
 .theta-brand {
-  font-size: 1.05rem;
+  font-size: 1.0rem;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
   color: var(--theta-text);
-  margin-bottom: 0.25rem;
+  margin-bottom: 0.2rem;
 }
 
 .theta-page-title {
   color: var(--theta-text);
-  font-size: 1.75rem;
+  font-size: 1.45rem;
   font-weight: 700;
-  margin-bottom: 0.25rem;
+  margin-bottom: 0.1rem;
+  line-height: 1.2;
 }
 
 .theta-page-subtitle {
   color: var(--theta-muted);
+  font-size: 0.85rem;
   margin-top: 0;
-  margin-bottom: 1rem;
+  margin-bottom: 0.6rem;
 }
+
+/* Tabular/monospace numerals for anything price-, quantity-, or
+   PnL-shaped — the single biggest visual signal of a "terminal" vs. a
+   generic web page. Numbers line up instead of jittering column widths. */
+.theta-mono,
+.theta-kpi-value,
+.theta-index-value,
+.theta-index-change-abs,
+.theta-index-change-pct,
+div[data-testid="stMetricValue"],
+div[data-testid="stDataFrame"] {
+  font-family: var(--theta-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------------
+   Cards
+   --------------------------------------------------------------------- */
 
 .theta-kpi-card,
 .theta-index-card,
 .theta-chart-panel {
   background: var(--theta-surface);
   border: 1px solid var(--theta-border);
-  border-radius: 8px;
-  padding: 0.85rem 1rem;
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem;
+  transition: border-color 120ms ease;
+}
+
+.theta-kpi-card:hover,
+.theta-index-card:hover {
+  border-color: var(--theta-border-soft);
 }
 
 .theta-kpi-label,
 .theta-index-symbol {
   color: var(--theta-muted);
-  font-size: 0.78rem;
+  font-size: 0.7rem;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
+  font-weight: 600;
 }
 
 .theta-kpi-value,
 .theta-index-value {
   color: var(--theta-text);
-  font-size: 1.35rem;
+  font-size: 1.2rem;
   font-weight: 600;
-  margin-top: 0.25rem;
+  margin-top: 0.15rem;
+  line-height: 1.25;
 }
 
 .theta-index-change {
   color: var(--theta-muted);
-  font-size: 0.85rem;
-  margin-top: 0.15rem;
+  font-size: 0.78rem;
+  margin-top: 0.1rem;
 }
 
 .theta-index-change-abs,
 .theta-index-change-pct {
-  font-size: 0.85rem;
+  font-size: 0.78rem;
 }
 
 .theta-change-positive {
@@ -90,13 +172,13 @@ section[data-testid="stSidebar"] {
 }
 
 .theta-index-updated {
-  color: var(--theta-muted);
-  font-size: 0.72rem;
-  margin-top: 0.35rem;
+  color: var(--theta-muted-dim);
+  font-size: 0.68rem;
+  margin-top: 0.25rem;
 }
 
 .theta-index-conn {
-  margin-top: 0.45rem;
+  margin-top: 0.3rem;
 }
 
 .theta-chart-panel {
@@ -104,64 +186,168 @@ section[data-testid="stSidebar"] {
   align-items: center;
   justify-content: center;
   position: relative;
+  padding: 0;
+  overflow: hidden;
 }
 
 .theta-chart-caption {
   color: var(--theta-muted);
   text-align: center;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
 }
 
 .theta-status-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.3rem;
 }
 
 .theta-status-label {
   color: var(--theta-muted);
-  font-size: 0.82rem;
+  font-size: 0.78rem;
 }
+
+/* ---------------------------------------------------------------------
+   Badges
+   --------------------------------------------------------------------- */
 
 .theta-badge {
   display: inline-block;
-  padding: 0.15rem 0.5rem;
-  border-radius: 999px;
-  font-size: 0.72rem;
-  font-weight: 600;
+  padding: 0.1rem 0.45rem;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 700;
   letter-spacing: 0.04em;
   border: 1px solid var(--theta-border);
+  font-family: var(--theta-font-mono);
 }
 
 .theta-badge-positive {
   color: var(--theta-positive);
+  background: rgba(46, 204, 113, 0.08);
   border-color: rgba(46, 204, 113, 0.35);
 }
 
 .theta-badge-negative {
   color: var(--theta-negative);
+  background: rgba(231, 76, 60, 0.08);
   border-color: rgba(231, 76, 60, 0.35);
 }
 
 .theta-badge-warning {
   color: var(--theta-warning);
+  background: rgba(240, 180, 41, 0.08);
   border-color: rgba(240, 180, 41, 0.35);
 }
 
 .theta-badge-neutral {
   color: var(--theta-accent);
+  background: rgba(61, 139, 255, 0.08);
   border-color: rgba(61, 139, 255, 0.35);
 }
 
+/* ---------------------------------------------------------------------
+   Event / log cards
+   --------------------------------------------------------------------- */
+
+.theta-event-card {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  background: var(--theta-surface);
+  border: 1px solid var(--theta-border);
+  border-left: 3px solid var(--theta-border);
+  border-radius: 4px;
+  padding: 0.4rem 0.65rem;
+  margin-bottom: 0.3rem;
+  font-size: 0.82rem;
+}
+
+.theta-event-card.level-error,
+.theta-event-card.level-critical {
+  border-left-color: var(--theta-negative);
+}
+
+.theta-event-card.level-warn,
+.theta-event-card.level-warning {
+  border-left-color: var(--theta-warning);
+}
+
+.theta-event-card.level-info {
+  border-left-color: var(--theta-accent);
+}
+
+.theta-event-card.level-debug {
+  border-left-color: var(--theta-muted-dim);
+}
+
+.theta-event-time {
+  color: var(--theta-muted-dim);
+  font-family: var(--theta-font-mono);
+  font-size: 0.72rem;
+  white-space: nowrap;
+  padding-top: 0.05rem;
+}
+
+.theta-event-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.theta-event-message {
+  color: var(--theta-text);
+  word-break: break-word;
+}
+
+.theta-event-source {
+  color: var(--theta-muted);
+  font-size: 0.7rem;
+  margin-top: 0.1rem;
+}
+
+/* ---------------------------------------------------------------------
+   AI reasoning panel
+   --------------------------------------------------------------------- */
+
+.theta-reasoning-list {
+  margin: 0.3rem 0 0 0;
+  padding-left: 1.1rem;
+  color: var(--theta-muted);
+  font-size: 0.82rem;
+}
+
+.theta-reasoning-list li {
+  margin-bottom: 0.2rem;
+}
+
+.theta-countdown {
+  font-family: var(--theta-font-mono);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--theta-accent);
+}
+
+/* ---------------------------------------------------------------------
+   Streamlit control overrides
+   --------------------------------------------------------------------- */
+
 div[data-testid="stMetricValue"] {
   color: var(--theta-text);
+  font-weight: 600;
+}
+
+div[data-testid="stMetricDelta"] {
+  font-family: var(--theta-font-mono);
 }
 
 .stButton > button {
   background-color: var(--theta-surface);
   color: var(--theta-text);
   border: 1px solid var(--theta-border);
+  border-radius: 4px;
+  padding: 0.3rem 0.9rem;
+  font-size: 0.85rem;
 }
 
 .stButton > button:hover {
@@ -169,7 +355,40 @@ div[data-testid="stMetricValue"] {
   color: var(--theta-accent);
 }
 
-.stDataFrame {
+.stTabs [data-baseweb="tab-list"] {
+  gap: 0.25rem;
+}
+
+.stTabs [data-baseweb="tab"] {
+  background-color: var(--theta-surface);
+  border-radius: 4px 4px 0 0;
+  padding: 0.4rem 0.9rem;
+  font-size: 0.85rem;
+}
+
+div[data-testid="stExpander"] {
   border: 1px solid var(--theta-border);
-  border-radius: 8px;
+  border-radius: 6px;
+  background: var(--theta-surface);
+}
+
+.stDataFrame,
+div[data-testid="stDataFrame"] {
+  border: 1px solid var(--theta-border);
+  border-radius: 6px;
+  font-size: 0.82rem;
+}
+
+div[data-testid="stMetric"] {
+  background: var(--theta-surface);
+  border: 1px solid var(--theta-border);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+}
+
+/* Radio-as-nav in the sidebar: give it a denser, list-like feel instead
+   of large circular radio buttons. */
+section[data-testid="stSidebar"] div[role="radiogroup"] label {
+  padding: 0.15rem 0;
+  font-size: 0.88rem;
 }

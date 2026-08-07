@@ -13,6 +13,7 @@ from dashboard.components.kpi_cards import render_kpi_row
 from dashboard.components.page_header import render_page_header
 from dashboard.dashboard_facade import STRATEGY_MONITOR_FAMILIES
 from dashboard.facade import NullIntegrationFacade
+from dashboard.utils.autorefresh import live_fragment
 from dashboard.view_models import (
     DashboardRenderContext,
     PLACEHOLDER,
@@ -264,20 +265,8 @@ def _render_selected_details(view: StrategyMonitorView) -> StrategyRowView | Non
     return selected
 
 
-def render(ctx: DashboardRenderContext) -> None:
-    """Render the strategy monitor page.
-
-    Displays recommendation banner, header KPIs, ranking table, selected
-    strategy details, gate evaluation, and recommended option legs. Read-only —
-    does not evaluate strategies or place orders.
-
-    Args:
-        ctx: Immutable render context with facade and session handles.
-    """
-    render_page_header(
-        "Strategy Monitor",
-        "Last strategy evaluation snapshot (read-only)",
-    )
+def _render_body(ctx: DashboardRenderContext) -> None:
+    """Render the strategy monitor body (re-invoked on every live refresh tick)."""
     snapshot = _resolve_monitor_view(ctx)
 
     _render_recommendation_banner(snapshot)
@@ -309,6 +298,31 @@ def render(ctx: DashboardRenderContext) -> None:
         for row in snapshot.strategies
     ):
         st.caption("Offline mode — awaiting backend strategy evaluations")
+
+
+def render(ctx: DashboardRenderContext) -> None:
+    """Render the strategy monitor page.
+
+    Displays recommendation banner, header KPIs, ranking table, selected
+    strategy details, gate evaluation, and recommended option legs. Read-only —
+    does not evaluate strategies or place orders. The body live-refreshes in
+    place; only the header renders once per navigation.
+
+    Args:
+        ctx: Immutable render context with facade and session handles.
+    """
+    render_page_header(
+        "Strategy Monitor",
+        "Last strategy evaluation snapshot (read-only)",
+    )
+    if not ctx.config.enable_autorefresh:
+        _render_body(ctx)
+        return
+    live_fragment(
+        lambda: _render_body(ctx),
+        interval_seconds=ctx.config.refresh_interval_seconds,
+        key="strategy_monitor_refresh",
+    )
 
 
 __all__ = (

@@ -105,6 +105,7 @@ class TestOfflinePaperLedger:
             "Today's P&L",
             "Realized P&L",
             "Unrealized P&L",
+            "ROI",
         ]
         assert all(card.value == PLACEHOLDER for card in cards)
         order_cards = paper_order_count_cards(view)

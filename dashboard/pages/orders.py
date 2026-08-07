@@ -15,6 +15,7 @@ from dashboard.components.kpi_cards import render_kpi_row
 from dashboard.components.page_header import render_page_header
 from dashboard.components.plotly_charts import build_allocation_pie
 from dashboard.facade import NullIntegrationFacade
+from dashboard.utils.autorefresh import live_fragment
 from dashboard.view_models import (
     DashboardRenderContext,
     OrdersPageView,
@@ -404,8 +405,15 @@ def render(ctx: DashboardRenderContext) -> None:
         ctx: Immutable render context with facade and session handles.
     """
     render_page_header("Orders", "Execution monitor (read-only)")
-    _render_orders_body(ctx)
-    st.caption("Order mutation not available in dashboard v1")
+
+    def _body() -> None:
+        _render_orders_body(ctx)
+        st.caption("Order mutation not available in dashboard v1")
+
+    if not ctx.config.enable_autorefresh:
+        _body()
+        return
+    live_fragment(_body, interval_seconds=ctx.config.refresh_interval_seconds, key="orders_refresh")
 
 
 __all__ = (

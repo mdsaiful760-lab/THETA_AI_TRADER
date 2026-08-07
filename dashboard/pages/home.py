@@ -3,29 +3,31 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 
 import streamlit as st
 
-from dashboard.components.chart_placeholder import render_tradingview_placeholder
 from dashboard.components.error_banner import render_error
 from dashboard.components.index_ticker import render_index_strip
 from dashboard.components.kpi_cards import render_kpi_row
+from dashboard.components.lightweight_chart import render_lightweight_chart
 from dashboard.components.page_header import render_page_header
 from dashboard.dashboard_facade import (
     FacadeHomeMarketIndices,
     HomeIndexQuote,
     home_indices_to_quote_views,
 )
-from dashboard.utils.polling import home_market_refresh_interval_ms
+from dashboard.utils.autorefresh import live_fragment
 from dashboard.view_models import (
     DashboardRenderContext,
     HomeKpiView,
     IndexQuoteView,
+    MarketChartView,
     PLACEHOLDER,
     default_index_quotes,
     home_kpi_cards,
 )
+
+_DEFAULT_CHART_UNDERLYING = "NIFTY"
 
 _logger = logging.getLogger("dashboard.pages.home")
 
@@ -92,45 +94,101 @@ def _render_home_market_strip(ctx: DashboardRenderContext) -> None:
 
 
 def _enable_home_market_autorefresh(ctx: DashboardRenderContext) -> None:
-    """Enable one-second Home market strip autorefresh without trading cycles.
-
-    Prefers ``streamlit-autorefresh`` for a full-script rerun. Falls back to a
-    Streamlit ``fragment(run_every=...)`` that re-renders only the index strip.
-    """
+    """Live-refresh the Home market strip in place — never the whole page."""
     if not ctx.config.enable_home_market_autorefresh:
         _render_home_market_strip(ctx)
         return
-
-    interval_ms = home_market_refresh_interval_ms(ctx.config)
-    try:
-        from streamlit_autorefresh import st_autorefresh
-
-        st_autorefresh(interval=interval_ms, key="home_market_refresh")
-        _render_home_market_strip(ctx)
-        return
-    except Exception:  # noqa: BLE001 - optional dependency
-        pass
-
-    fragment = getattr(st, "fragment", None)
-    if fragment is not None:
-        seconds = float(ctx.config.home_market_refresh_seconds)
-
-        @fragment(run_every=timedelta(seconds=seconds))
-        def _home_market_fragment() -> None:
-            """Re-render the index strip on the Home refresh interval."""
-            _render_home_market_strip(ctx)
-
-        _home_market_fragment()
-        return
-
-    _logger.warning(
-        "Home market autorefresh unavailable; install streamlit-autorefresh "
-        "or use Streamlit >= 1.33 for fragment refresh"
+    live_fragment(
+        lambda: _render_home_market_strip(ctx),
+        interval_seconds=ctx.config.home_market_refresh_seconds,
+        key="home_market_refresh",
     )
-    _render_home_market_strip(ctx)
-    st.caption(
-        f"Home market refresh interval: {ctx.config.home_market_refresh_seconds:.1f}s "
-        "(install streamlit-autorefresh for automatic refresh)"
+
+
+def _render_ai_panel(ctx: DashboardRenderContext) -> None:
+    """Render the AI reasoning panel from already-computed decision output."""
+    getter = getattr(ctx.facade, "get_ai_panel", None)
+    panel = getter() if callable(getter) else None
+    st.markdown("**AI Reasoning**")
+    if panel is None:
+        st.info("Awaiting backend AI decision loop")
+        return
+
+    countdown = getattr(panel, "next_evaluation_display", PLACEHOLDER)
+    decision_status = getattr(panel, "decision_status", PLACEHOLDER)
+    risk_verdict = getattr(panel, "risk_verdict", PLACEHOLDER)
+    st.markdown(
+        (
+            f"<div class='theta-status-row'>"
+            f"<span class='theta-status-label'>Next evaluation in</span>"
+            f"<span class='theta-countdown'>{countdown}</span>"
+            f"</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Decision: {decision_status} · Risk: {risk_verdict}")
+
+    reasons = getattr(panel, "reasons", ())
+    if reasons:
+        items = "".join(f"<li>{reason}</li>" for reason in reasons)
+        st.markdown(f"<ul class='theta-reasoning-list'>{items}</ul>", unsafe_allow_html=True)
+    else:
+        st.caption("No reasoning recorded for the latest cycle")
+
+
+def _resolve_primary_chart(ctx: DashboardRenderContext) -> MarketChartView:
+    """Load the real candlestick/EMA/VWAP series for the AI's configured underlying.
+
+    Uses the AI panel's own real ``underlying`` field when a decision has
+    run; otherwise falls back to the platform default. Optional capability
+    — present only when the facade exposes ``get_market_chart``.
+    """
+    underlying = _DEFAULT_CHART_UNDERLYING
+    panel_getter = getattr(ctx.facade, "get_ai_panel", None)
+    panel = panel_getter() if callable(panel_getter) else None
+    panel_underlying = getattr(panel, "underlying", None) if panel is not None else None
+    if panel_underlying and panel_underlying != PLACEHOLDER:
+        underlying = panel_underlying
+
+    chart_getter = getattr(ctx.facade, "get_market_chart", None)
+    if not callable(chart_getter):
+        return MarketChartView(underlying=underlying, source="offline")
+    try:
+        chart = chart_getter(underlying)
+        if isinstance(chart, MarketChartView):
+            return chart
+    except Exception as exc:  # noqa: BLE001 - Home must not crash
+        _logger.warning("home chart unavailable: %s", exc)
+    return MarketChartView(underlying=underlying, source="offline")
+
+
+def _render_chart(ctx: DashboardRenderContext) -> None:
+    """Render the primary underlying's real candlestick chart."""
+    chart = _resolve_primary_chart(ctx)
+    render_lightweight_chart(chart)
+
+
+def _enable_chart_autorefresh(ctx: DashboardRenderContext) -> None:
+    """Live-refresh the primary chart in place — never the whole page."""
+    if not ctx.config.enable_autorefresh:
+        _render_chart(ctx)
+        return
+    live_fragment(
+        lambda: _render_chart(ctx),
+        interval_seconds=ctx.config.refresh_interval_seconds,
+        key="home_chart_refresh",
+    )
+
+
+def _enable_ai_panel_autorefresh(ctx: DashboardRenderContext) -> None:
+    """Live-refresh the AI reasoning panel in place — never the whole page."""
+    if not ctx.config.enable_autorefresh:
+        _render_ai_panel(ctx)
+        return
+    live_fragment(
+        lambda: _render_ai_panel(ctx),
+        interval_seconds=ctx.config.refresh_interval_seconds,
+        key="ai_panel_refresh",
     )
 
 
@@ -152,8 +210,10 @@ def render(ctx: DashboardRenderContext) -> None:
         _logger.warning("home snapshot unavailable: %s", exc)
         render_kpi_row(home_kpi_cards(HomeKpiView()))
 
-    render_tradingview_placeholder()
+    _enable_chart_autorefresh(ctx)
     if cycle_summary:
         st.caption(cycle_summary)
     else:
         st.caption("Awaiting backend cycle summary")
+
+    _enable_ai_panel_autorefresh(ctx)

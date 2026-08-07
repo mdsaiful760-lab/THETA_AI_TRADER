@@ -72,7 +72,7 @@ class DashboardUiConfig:
     app_title: str = "THETA AI TRADER"
     default_page: str = "home"
     refresh_interval_seconds: float = 2.0
-    enable_autorefresh: bool = False
+    enable_autorefresh: bool = True
     show_demo_banners: bool = True
     plotly_template: str = "plotly_dark"
     index_symbols: tuple[str, ...] = DEFAULT_INDEX_SYMBOLS
