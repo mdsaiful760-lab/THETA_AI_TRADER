@@ -714,7 +714,7 @@ def render(ctx: DashboardRenderContext) -> None:
     Args:
         ctx: Immutable render context with facade and session handles.
     """
-    render_page_header("Paper Trading", "Virtual ledger (read-only)")
+    render_page_header("Trade Execution", "Virtual paper-trading ledger (read-only)")
     _enable_paper_trading_autorefresh(ctx)
 
 

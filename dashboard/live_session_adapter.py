@@ -450,15 +450,40 @@ class DashboardLiveSessionAdapter:
                 signal_active=status_value == "trade_candidate",
                 as_of=decision_as_of if isinstance(decision_as_of, datetime) else None,
                 underlying=_display(_attr(decision, "underlying"), PLACEHOLDER),
+                # Real, already-computed position-sizing/risk-budget fields
+                # from the same decision object — relayed only, never
+                # recomputed or estimated by the dashboard.
+                market_regime=_display(_attr(decision, "market_regime"), PLACEHOLDER),
+                regime_confidence=_display(_attr(decision, "regime_confidence"), PLACEHOLDER),
+                strategy_family=_display(_attr(decision, "strategy_family"), PLACEHOLDER),
+                confidence_score=_attr(decision, "confidence_score"),
+                approved_risk_budget=_attr(decision, "approved_risk_budget"),
+                approved_risk_pct=_attr(decision, "approved_risk_pct"),
+                final_lots=_attr(decision, "final_lots"),
+                final_quantity=_attr(decision, "final_quantity"),
+                sizing_reason=_display(sizing_reason, PLACEHOLDER),
             )
 
-    def get_underlying_candles(self, underlying: str) -> object | None:
+    def get_underlying_candles(
+        self,
+        underlying: str,
+        *,
+        interval: str = _CANDLE_INTERVAL,
+        lookback: timedelta = _CANDLE_LOOKBACK,
+    ) -> object | None:
         """Return real recent OHLCV candles for ``underlying`` for charting.
 
         Delegates to the already-connected ``market_streaming`` engine's own
         ``fetch_historical_candles`` — the same broker link it already uses
         for live snapshots. Never opens a new broker connection and never
         estimates or backfills a candle.
+
+        Args:
+            underlying: Underlying symbol.
+            interval: Real broker candle interval (e.g. ``"5minute"``,
+                ``"day"``) — passed straight through to the same
+                already-connected fetch, never fabricated.
+            lookback: Real time span to request, ending now.
 
         Returns:
             ``None`` when no streaming handle is registered, the underlying
@@ -478,8 +503,8 @@ class DashboardLiveSessionAdapter:
             now = self._clock()
             request = SimpleNamespace(
                 instrument_key=quote_key,
-                interval=_CANDLE_INTERVAL,
-                from_ts=now - _CANDLE_LOOKBACK,
+                interval=interval,
+                from_ts=now - lookback,
                 to_ts=now,
                 continuous=False,
                 correlation_id=None,
@@ -492,7 +517,7 @@ class DashboardLiveSessionAdapter:
             rows = _attr(result, "candles", default=()) or ()
             return SimpleNamespace(
                 underlying=underlying,
-                interval=_CANDLE_INTERVAL,
+                interval=interval,
                 candles=tuple(rows),
             )
 

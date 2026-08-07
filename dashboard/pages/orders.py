@@ -28,14 +28,15 @@ from dashboard.view_models import (
 _logger = logging.getLogger("dashboard.pages.orders")
 
 _ORDER_COLUMNS: tuple[str, ...] = (
-    "Order ID",
     "Time",
-    "Symbol",
+    "Order ID",
     "Strategy",
+    "Instrument",
     "Side",
     "Qty",
-    "Price",
     "Status",
+    "Fill Price",
+    "Latency",
 )
 
 _TERMINAL_STATUSES: frozenset[str] = frozenset(
@@ -120,14 +121,18 @@ def _orders_frame(orders: Sequence[object]) -> pd.DataFrame:
     for order in orders:
         rows.append(
             {
-                "Order ID": _display(getattr(order, "order_id", None)),
                 "Time": _display(getattr(order, "timestamp", None)),
-                "Symbol": _display(getattr(order, "symbol", None)),
+                "Order ID": _display(getattr(order, "order_id", None)),
                 "Strategy": _display(getattr(order, "strategy", None)),
+                "Instrument": _display(getattr(order, "symbol", None)),
                 "Side": _display(getattr(order, "side", None)),
                 "Qty": _display(getattr(order, "quantity", None)),
-                "Price": _display(getattr(order, "price", None)),
                 "Status": _display(getattr(order, "status", None)),
+                "Fill Price": _display(getattr(order, "price", None)),
+                # No submit/fill timestamp pair is exposed by the backend
+                # order source yet — shown as a real placeholder, never a
+                # fabricated duration.
+                "Latency": PLACEHOLDER,
             }
         )
     if not rows:
@@ -227,19 +232,19 @@ def _build_order_timeline_figure(df: pd.DataFrame) -> go.Figure:
     timeline builder exists there yet for this milestone.
 
     Args:
-        df: DataFrame with ``Time``, ``Symbol``, and ``Status`` columns
+        df: DataFrame with ``Time``, ``Instrument``, and ``Status`` columns
             (already-computed upstream display values; nothing is derived).
 
     Returns:
         Dark-themed Plotly figure (empty trace set when ``df`` has no rows).
     """
     figure = go.Figure()
-    if not df.empty and {"Time", "Symbol", "Status"}.issubset(df.columns):
+    if not df.empty and {"Time", "Instrument", "Status"}.issubset(df.columns):
         for status_label, group in df.groupby("Status"):
             figure.add_trace(
                 go.Scatter(
                     x=group["Time"],
-                    y=group["Symbol"],
+                    y=group["Instrument"],
                     mode="markers",
                     name=str(status_label),
                     marker={
@@ -257,7 +262,7 @@ def _build_order_timeline_figure(df: pd.DataFrame) -> go.Figure:
         margin={"l": 24, "r": 24, "t": 36, "b": 24},
         title="Order Timeline",
         xaxis_title="Time",
-        yaxis_title="Symbol",
+        yaxis_title="Instrument",
     )
     return figure
 

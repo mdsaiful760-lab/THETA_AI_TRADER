@@ -11,6 +11,7 @@
   --theta-positive: #2ECC71;
   --theta-negative: #E74C3C;
   --theta-warning: #F0B429;
+  --theta-purple: #9B6DFF;
   --theta-font-ui: -apple-system, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
   --theta-font-mono: "SF Mono", "IBM Plex Mono", "JetBrains Mono", ui-monospace, Consolas, monospace;
 }
@@ -39,15 +40,25 @@ section[data-testid="stSidebar"] .block-container {
   padding-top: 1rem;
 }
 
-/* Streamlit's top chrome (Deploy / menu bar) — match the dark shell
-   instead of leaving a bright white strip across an otherwise dark app. */
+/* Streamlit's top chrome (Deploy / hamburger menu / footer badge) — this
+   is a custom trading-terminal shell, not a generic Streamlit app, so the
+   default framework branding is fully hidden rather than merely recolored. */
 header[data-testid="stHeader"] {
   background-color: var(--theta-bg);
   border-bottom: 1px solid var(--theta-border);
+  height: 0;
+  min-height: 0;
 }
 
-div[data-testid="stToolbar"] {
-  color: var(--theta-muted);
+div[data-testid="stToolbar"],
+div[data-testid="stDecoration"],
+button[data-testid="stBaseButton-headerNoPadding"],
+#MainMenu,
+footer,
+.stDeployButton,
+div[data-testid="stDeployButton"] {
+  display: none !important;
+  visibility: hidden !important;
 }
 
 /* Tighten vertical rhythm between stacked elements site-wide. */
@@ -366,6 +377,44 @@ div[data-testid="stMetricDelta"] {
   font-size: 0.85rem;
 }
 
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+  color: var(--theta-accent);
+}
+
+.stTabs [data-baseweb="tab-highlight"],
+.stTabs [data-baseweb="tab-border"] {
+  background-color: var(--theta-accent) !important;
+}
+
+/* Segmented control (chart timeframe tabs) — recolor from Streamlit's
+   default red accent to the dashboard's blue accent. */
+button[data-testid="stBaseButton-segmented_control"] {
+  background: var(--theta-surface);
+  border-color: var(--theta-border);
+  color: var(--theta-muted);
+}
+
+button[data-testid="stBaseButton-segmented_controlActive"] {
+  background: rgba(61, 139, 255, 0.14);
+  border-color: var(--theta-accent);
+  color: var(--theta-accent);
+}
+
+button[data-testid^="stBaseButton-segmented_control"]:focus:not(:active) {
+  border-color: var(--theta-accent);
+  box-shadow: none;
+}
+
+/* Native bordered containers (st.container(border=True, key="theta_panel_*"))
+   — used for every dashboard overview panel card. The st-key-<key> class is
+   Streamlit's own documented styling hook for a keyed container. */
+div[class*="st-key-theta_panel_"] > div[data-testid="stVerticalBlock"] {
+  background: var(--theta-surface) !important;
+  border-color: var(--theta-border) !important;
+  border-radius: 10px !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
 div[data-testid="stExpander"] {
   border: 1px solid var(--theta-border);
   border-radius: 6px;
@@ -391,4 +440,408 @@ div[data-testid="stMetric"] {
 section[data-testid="stSidebar"] div[role="radiogroup"] label {
   padding: 0.15rem 0;
   font-size: 0.88rem;
+}
+
+/* ---------------------------------------------------------------------
+   Top bar
+   --------------------------------------------------------------------- */
+
+.theta-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  background: var(--theta-surface);
+  border: 1px solid var(--theta-border);
+  border-radius: 10px;
+  padding: 0.55rem 1.1rem;
+  margin-bottom: 0.9rem;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+
+.theta-topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: var(--theta-text);
+  white-space: nowrap;
+}
+
+.theta-topbar-brand .theta-brand-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(61, 139, 255, 0.12);
+  color: var(--theta-accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+}
+
+.theta-ticker {
+  display: flex;
+  align-items: center;
+  gap: 1.6rem;
+  overflow-x: auto;
+}
+
+.theta-ticker-item {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.theta-ticker-symbol {
+  color: var(--theta-muted);
+  font-size: 0.66rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.theta-ticker-value {
+  font-family: var(--theta-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 0.92rem;
+}
+
+.theta-ticker-change {
+  font-family: var(--theta-font-mono);
+  font-size: 0.72rem;
+}
+
+.theta-topbar-meta {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  white-space: nowrap;
+}
+
+.theta-live-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+}
+
+.theta-live-dot.on {
+  color: var(--theta-positive);
+  background: rgba(46, 204, 113, 0.1);
+}
+
+.theta-live-dot.off {
+  color: var(--theta-negative);
+  background: rgba(231, 76, 60, 0.1);
+}
+
+.theta-live-dot .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.theta-topbar-clock {
+  font-family: var(--theta-font-mono);
+  color: var(--theta-muted);
+  font-size: 0.82rem;
+}
+
+/* ---------------------------------------------------------------------
+   Metric cards (Market Regime / VIX / PCR / Max Pain / FII-DII)
+   --------------------------------------------------------------------- */
+
+.theta-metric-card {
+  background: var(--theta-surface);
+  border: 1px solid var(--theta-border);
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  height: 100%;
+}
+
+.theta-metric-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--theta-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+.theta-metric-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 0.85rem;
+}
+
+.theta-metric-value {
+  font-family: var(--theta-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--theta-text);
+  line-height: 1.2;
+}
+
+.theta-metric-caption {
+  color: var(--theta-muted);
+  font-size: 0.76rem;
+  margin-top: 0.15rem;
+}
+
+.theta-metric-unavailable .theta-metric-value {
+  color: var(--theta-muted-dim);
+  font-size: 1.1rem;
+}
+
+/* ---------------------------------------------------------------------
+   Engine status
+   --------------------------------------------------------------------- */
+
+.theta-engine-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--theta-border-soft);
+  font-size: 0.82rem;
+}
+
+.theta-engine-row:last-child {
+  border-bottom: none;
+}
+
+.theta-engine-name {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--theta-text);
+}
+
+.theta-engine-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.theta-engine-dot.up {
+  background: var(--theta-positive);
+  box-shadow: 0 0 6px rgba(46, 204, 113, 0.7);
+}
+
+.theta-engine-dot.down {
+  background: var(--theta-negative);
+}
+
+.theta-engine-right {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  color: var(--theta-muted);
+  font-family: var(--theta-font-mono);
+  font-size: 0.76rem;
+}
+
+/* ---------------------------------------------------------------------
+   Alerts feed
+   --------------------------------------------------------------------- */
+
+.theta-alert-row {
+  display: flex;
+  gap: 0.55rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--theta-border-soft);
+}
+
+.theta-alert-row:last-child {
+  border-bottom: none;
+}
+
+.theta-alert-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 0.35rem;
+  flex-shrink: 0;
+}
+
+.theta-alert-title {
+  color: var(--theta-text);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.theta-alert-detail {
+  color: var(--theta-muted);
+  font-size: 0.74rem;
+}
+
+.theta-alert-time {
+  color: var(--theta-muted-dim);
+  font-size: 0.68rem;
+  white-space: nowrap;
+  margin-left: auto;
+  padding-left: 0.5rem;
+}
+
+/* ---------------------------------------------------------------------
+   Sidebar groups
+   --------------------------------------------------------------------- */
+
+.theta-sidebar-group-label {
+  color: var(--theta-muted-dim);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin: 0.75rem 0 0.15rem 0.1rem;
+}
+
+section[data-testid="stSidebar"] .stButton > button {
+  text-align: left;
+  justify-content: flex-start;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--theta-muted);
+  font-size: 0.85rem;
+  padding: 0.35rem 0.6rem;
+}
+
+section[data-testid="stSidebar"] .stButton > button:hover {
+  background: var(--theta-surface-raised);
+  color: var(--theta-text);
+  border-color: var(--theta-border);
+}
+
+section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+  background: var(--theta-accent);
+  color: #ffffff;
+  border-color: var(--theta-accent);
+  font-weight: 600;
+}
+
+section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+  background: var(--theta-accent);
+  color: #ffffff;
+}
+
+.theta-sidebar-user {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.2rem;
+  border-top: 1px solid var(--theta-border);
+  margin-top: 0.6rem;
+}
+
+.theta-sidebar-user-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--theta-accent);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.78rem;
+  flex-shrink: 0;
+}
+
+.theta-sidebar-user-name {
+  color: var(--theta-text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.theta-sidebar-user-role {
+  color: var(--theta-muted);
+  font-size: 0.7rem;
+}
+
+/* ---------------------------------------------------------------------
+   Section panel wrapper (used by every dashboard panel/card block)
+   --------------------------------------------------------------------- */
+
+.theta-panel {
+  background: var(--theta-surface);
+  border: 1px solid var(--theta-border);
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  margin-bottom: 0.9rem;
+}
+
+.theta-panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--theta-text);
+  margin-bottom: 0.5rem;
+}
+
+.theta-panel-link {
+  color: var(--theta-accent);
+  font-size: 0.78rem;
+  text-decoration: none;
+}
+
+.theta-footer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--theta-muted);
+  font-size: 0.74rem;
+  padding: 0.5rem 0.2rem 0.2rem 0.2rem;
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--theta-border);
+}
+
+.theta-footer-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 0.35rem;
+}
+
+/* Unavailable-capability shells (Strategy Builder / Backtesting / etc.) */
+.theta-unavailable-panel {
+  background: var(--theta-surface);
+  border: 1px dashed var(--theta-border);
+  border-radius: 10px;
+  padding: 2.2rem 1.5rem;
+  text-align: center;
+  color: var(--theta-muted);
+}
+
+.theta-unavailable-panel .icon {
+  font-size: 1.8rem;
+  margin-bottom: 0.5rem;
+}
+
+.theta-unavailable-panel .title {
+  color: var(--theta-text);
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin-bottom: 0.3rem;
 }

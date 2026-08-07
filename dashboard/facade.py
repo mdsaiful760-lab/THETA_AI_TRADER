@@ -154,12 +154,27 @@ class NullIntegrationFacade:
         """Return ``None`` — no AI decision loop attached offline."""
         return None
 
-    def get_market_chart(self, underlying: str) -> object:
+    def get_market_chart(
+        self,
+        underlying: str,
+        *,
+        fast_span: int = 9,
+        slow_span: int = 21,
+        timeframe: str = "1D",
+    ) -> object:
         """Return offline chart placeholders — no candles fetched."""
         from dashboard.view_models import MarketChartView
 
+        del fast_span, slow_span, timeframe
         with self._lock:
             return MarketChartView(underlying=underlying, source="offline")
+
+    def get_dashboard_overview(self, underlying: str = "NIFTY") -> object:
+        """Return offline Dashboard Overview placeholders."""
+        from dashboard.view_models import DashboardOverviewView
+
+        with self._lock:
+            return DashboardOverviewView(selected_underlying=underlying, source="offline")
 
     def get_market_snapshot(self) -> MarketPageView:
         """Return offline Market page placeholders including index cards."""

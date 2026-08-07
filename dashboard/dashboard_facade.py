@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
 from dashboard.facade import DashboardBackendFacade
 from dashboard.view_models import (
+    AlertRow,
     AnalyticsPageView,
     ApmeDecisionView,
     ApmePageView,
     ChartMarkerView,
+    DashboardOverviewView,
+    EngineStatusRow,
     FacadeActionResult,
     HomeKpiView,
     HomePageView,
@@ -24,6 +28,8 @@ from dashboard.view_models import (
     LogsPageView,
     MarketChartView,
     MarketPageView,
+    MetricCardView,
+    OiBuildupRow,
     OrderRowView,
     OrdersPageView,
     PaperPositionView,
@@ -32,6 +38,7 @@ from dashboard.view_models import (
     PortfolioPositionView,
     RiskPageView,
     RuntimeStateView,
+    ScannerRow,
     SettingsPageView,
     StrategyGateView,
     StrategyLegView,
@@ -48,6 +55,19 @@ HOME_MARKET_INDEX_SYMBOLS: tuple[str, ...] = (
     "BANKNIFTY",
     "SENSEX",
     "INDIA VIX",
+)
+
+# Real broker interval + lookback span per chart timeframe tab. Every value
+# is a genuine Kite historical-data interval string — never fabricated.
+_TIMEFRAME_PRESETS: Mapping[str, tuple[str, timedelta]] = MappingProxyType(
+    {
+        "1D": ("5minute", timedelta(days=1)),
+        "5D": ("15minute", timedelta(days=5)),
+        "1M": ("60minute", timedelta(days=30)),
+        "3M": ("day", timedelta(days=90)),
+        "6M": ("day", timedelta(days=180)),
+        "1Y": ("day", timedelta(days=365)),
+    }
 )
 
 # Canonical Strategy Monitor families: (family_id, display_name)
@@ -2007,6 +2027,117 @@ def _nearest_candle(
     return best
 
 
+def _parse_chain_oi_rows(
+    rows: tuple[tuple[str, ...], ...],
+) -> tuple[tuple[float, str, float, float], ...]:
+    """Parse ``(strike, type, ltp, oi)`` floats out of real option-chain rows.
+
+    ``rows`` follows ``MarketPageView.option_chain_columns`` order
+    (strike, type, ltp, bid, ask, oi, ...). Rows that fail to parse are
+    dropped — never estimated.
+    """
+    parsed: list[tuple[float, str, float, float]] = []
+    for row in rows:
+        if len(row) < 6:
+            continue
+        option_type = row[1].strip().upper()
+        if option_type not in ("CE", "PE", "CALL", "PUT"):
+            continue
+        try:
+            strike = float(row[0])
+            ltp = float(row[2])
+            oi = float(row[5])
+        except (ValueError, IndexError):
+            continue
+        parsed.append((strike, option_type, ltp, oi))
+    return tuple(parsed)
+
+
+def _compute_put_call_ratio(rows: tuple[tuple[str, ...], ...]) -> float | None:
+    """Real PCR = total real Put OI / total real Call OI from the option chain."""
+    call_oi = 0.0
+    put_oi = 0.0
+    for _strike, option_type, _ltp, oi in _parse_chain_oi_rows(rows):
+        if option_type in ("CE", "CALL"):
+            call_oi += oi
+        elif option_type in ("PE", "PUT"):
+            put_oi += oi
+    if call_oi <= 0:
+        return None
+    return put_oi / call_oi
+
+
+def _compute_max_pain_strike(rows: tuple[tuple[str, ...], ...]) -> float | None:
+    """Real max-pain strike: the strike minimizing total real-OI-weighted
+    option-writer payout at expiry (the standard max-pain algorithm),
+    computed purely from real strike/type/OI already in the chain."""
+    parsed = _parse_chain_oi_rows(rows)
+    if not parsed:
+        return None
+    strikes = sorted({strike for strike, *_ in parsed})
+    best_strike: float | None = None
+    best_payout: float | None = None
+    for candidate in strikes:
+        payout = 0.0
+        for strike, option_type, _ltp, oi in parsed:
+            if option_type in ("CE", "CALL"):
+                intrinsic = max(0.0, candidate - strike)
+            else:
+                intrinsic = max(0.0, strike - candidate)
+            payout += intrinsic * oi
+        if best_payout is None or payout < best_payout:
+            best_payout = payout
+            best_strike = candidate
+    return best_strike
+
+
+def _build_oi_buildup_rows(
+    rows: tuple[tuple[str, ...], ...], placeholder: str
+) -> tuple[tuple["OiBuildupRow", ...], tuple["OiBuildupRow", ...]]:
+    """Top-5 real CALL and PUT rows by real open interest, descending.
+
+    ``change`` is a real absolute OI delta (this poll minus the previous
+    poll for that instrument) — displayed as a signed count, never
+    mislabeled as a percentage the platform cannot compute from a single
+    baseline-less snapshot.
+    """
+    calls: list[tuple[float, OiBuildupRow]] = []
+    puts: list[tuple[float, OiBuildupRow]] = []
+    for row in rows:
+        if len(row) < 7:
+            continue
+        option_type = row[1].strip().upper()
+        if option_type not in ("CE", "PE", "CALL", "PUT"):
+            continue
+        try:
+            oi = float(row[5])
+        except (ValueError, IndexError):
+            continue
+        change_raw = row[6]
+        trend = placeholder
+        change_display = placeholder
+        try:
+            change_value = float(change_raw)
+            change_display = f"{change_value:+,.0f}"
+            trend = "up" if change_value > 0 else "down" if change_value < 0 else "flat"
+        except (ValueError, TypeError):
+            pass
+        item = OiBuildupRow(
+            strike=row[0],
+            open_interest=f"{oi:,.0f}",
+            change_percent=change_display,
+            ltp=row[2],
+            trend=trend,
+        )
+        if option_type in ("CE", "CALL"):
+            calls.append((oi, item))
+        else:
+            puts.append((oi, item))
+    calls.sort(key=lambda pair: pair[0], reverse=True)
+    puts.sort(key=lambda pair: pair[0], reverse=True)
+    return tuple(item for _, item in calls[:5]), tuple(item for _, item in puts[:5])
+
+
 def _redact_text(text: str, secret_keys: tuple[str, ...]) -> str:
     """Redact secret-like substrings from free-form text."""
     redacted = _SECRET_PATTERN.sub(r"\1\2***", text)
@@ -2062,6 +2193,11 @@ class DashboardIntegrationFacade:
         self._cache: dict[str, tuple[datetime, object]] = {}
         self._last_refresh_at: datetime | None = None
         self._last_error_code: str | None = None
+        # Real per-poll readings captured over time (never estimated) so
+        # Home overview metric cards can show a genuine sparkline instead
+        # of a fabricated shape. Bounded so memory stays flat.
+        self._metric_history: dict[str, list[float]] = {}
+        self._metric_history_max = 60
 
     @property
     def schema_version(self) -> str:
@@ -2118,15 +2254,52 @@ class DashboardIntegrationFacade:
         """
         return self._cached_get("get_ai_panel", lambda: self._try_optional("get_ai_panel"))
 
-    def get_market_chart(self, underlying: str) -> MarketChartView:
+    def get_market_chart(
+        self,
+        underlying: str,
+        *,
+        fast_span: int = 9,
+        slow_span: int = 21,
+        timeframe: str = "1D",
+    ) -> MarketChartView:
         """Return the real candlestick/EMA/VWAP chart series for ``underlying``.
 
         Aggregates real OHLCV candles from the injected session's optional
         ``get_underlying_candles`` accessor when present; otherwise returns
         offline placeholders. Never fetches broker data itself.
+
+        Args:
+            underlying: Underlying symbol.
+            fast_span: Fast EMA span (default 9 for the Market page panel;
+                pass 20 for the Home overview's EMA 20/50 legend).
+            slow_span: Slow EMA span (default 21; pass 50 for Home).
+            timeframe: One of ``1D/5D/1M/3M/6M/1Y`` — maps to a real
+                broker interval + lookback span; unknown values fall back
+                to ``1D``.
         """
-        cache_key = f"get_market_chart:{underlying.strip().upper()}"
-        return self._cached_get(cache_key, lambda: self._fetch_market_chart(underlying))
+        cache_key = (
+            f"get_market_chart:{underlying.strip().upper()}:{fast_span}:{slow_span}:{timeframe}"
+        )
+        return self._cached_get(
+            cache_key,
+            lambda: self._fetch_market_chart(
+                underlying, fast_span=fast_span, slow_span=slow_span, timeframe=timeframe
+            ),
+        )
+
+    def get_dashboard_overview(self, underlying: str = "NIFTY") -> DashboardOverviewView:
+        """Compose the full Home / Dashboard Overview page.
+
+        Pure composition over already-existing facade reads (market
+        snapshot, system status, strategy status, AI panel, paper ledger,
+        logs, chart) — issues no calls beyond what those already make.
+        Metrics with no real backing data source on this platform (Market
+        Breadth, FII/DII net flow) are returned with ``available=False``
+        rather than a fabricated number; PCR and Max Pain are computed as
+        real derived arithmetic over real option-chain OI.
+        """
+        cache_key = f"get_dashboard_overview:{underlying.strip().upper()}"
+        return self._cached_get(cache_key, lambda: self._fetch_dashboard_overview(underlying))
 
     def get_home_market_indices(self) -> FacadeHomeMarketIndices:
         """Return the four Home terminal index quotes for display.
@@ -2307,6 +2480,22 @@ class DashboardIntegrationFacade:
         """Record last upstream error under lock."""
         with self._lock:
             self._last_error_code = code
+
+    def _record_metric(self, key: str, value: float | None) -> tuple[float, ...]:
+        """Append one real per-poll reading and return the bounded real history.
+
+        Never estimates or backfills — a metric with no real value this
+        poll (``value is None``) is simply not appended.
+        """
+        if value is None:
+            with self._lock:
+                return tuple(self._metric_history.get(key, ()))
+        with self._lock:
+            series = self._metric_history.setdefault(key, [])
+            series.append(value)
+            if len(series) > self._metric_history_max:
+                del series[: len(series) - self._metric_history_max]
+            return tuple(series)
 
     def _fetch_system_status(self) -> FacadeSystemStatus:
         """Build system status from session or offline defaults."""
@@ -2550,12 +2739,31 @@ class DashboardIntegrationFacade:
             atm_strike=_display_str(_attr(snap, "atm_strike"), ph),
         )
 
-    def _fetch_market_chart(self, underlying: str) -> MarketChartView:
+    def _fetch_market_chart(
+        self,
+        underlying: str,
+        *,
+        fast_span: int = 9,
+        slow_span: int = 21,
+        timeframe: str = "1D",
+    ) -> MarketChartView:
         """Build the real candlestick/EMA/VWAP chart series for ``underlying``."""
         if self._session is None or not hasattr(self._session, "get_underlying_candles"):
             return MarketChartView(underlying=underlying, source="offline")
+        interval, lookback = _TIMEFRAME_PRESETS.get(timeframe, _TIMEFRAME_PRESETS["1D"])
         try:
-            raw = self._session.get_underlying_candles(underlying)
+            raw = self._session.get_underlying_candles(
+                underlying, interval=interval, lookback=lookback
+            )
+        except TypeError:
+            # Simpler duck-typed sessions (e.g. test stubs) may only accept
+            # the single positional argument — degrade to their default
+            # interval/lookback rather than failing the whole chart.
+            try:
+                raw = self._session.get_underlying_candles(underlying)
+            except Exception:
+                self._record_upstream_error("DIF.UPSTREAM.ERROR")
+                return MarketChartView(underlying=underlying, source="offline")
         except Exception:
             self._record_upstream_error("DIF.UPSTREAM.ERROR")
             return MarketChartView(underlying=underlying, source="offline")
@@ -2571,8 +2779,8 @@ class DashboardIntegrationFacade:
             underlying=underlying,
             interval=interval,
             candles=candles,
-            ema_fast=_compute_ema_series(candles, span=9),
-            ema_slow=_compute_ema_series(candles, span=21),
+            ema_fast=_compute_ema_series(candles, span=fast_span),
+            ema_slow=_compute_ema_series(candles, span=slow_span),
             vwap=_compute_vwap_series(candles),
             markers=self._build_chart_markers(underlying, candles),
             source="live",
@@ -2615,6 +2823,227 @@ class DashboardIntegrationFacade:
                 kind="ai_signal",
                 position="above",
             ),
+        )
+
+    def _fetch_dashboard_overview(self, underlying: str) -> DashboardOverviewView:
+        """Build the Home / Dashboard Overview page from real, already-fetched reads."""
+        ph = self._config.placeholder
+        if self._session is None:
+            return DashboardOverviewView(selected_underlying=underlying, source="offline")
+
+        started = time.perf_counter()
+        market = self.get_market_snapshot()
+        market_latency_ms = (time.perf_counter() - started) * 1000.0
+
+        started = time.perf_counter()
+        system = self.get_system_status()
+        system_latency_ms = (time.perf_counter() - started) * 1000.0
+
+        started = time.perf_counter()
+        strategy = self.get_strategy_status()
+        strategy_latency_ms = (time.perf_counter() - started) * 1000.0
+
+        started = time.perf_counter()
+        panel = self.get_ai_panel()
+        ai_latency_ms = (time.perf_counter() - started) * 1000.0
+
+        started = time.perf_counter()
+        ledger = self.get_paper_trading_ledger()
+        ledger_latency_ms = (time.perf_counter() - started) * 1000.0
+
+        indices = self.get_home_market_indices()
+        logs = self.get_logs(limit=8)
+        chart = self.get_market_chart(underlying, fast_span=20, slow_span=50)
+
+        regime_raw = strategy.market_regime
+        regime_card = MetricCardView(
+            label="Market Regime",
+            value=regime_raw.replace("_", " ").upper() if regime_raw != ph else ph,
+            caption=(
+                f"Confidence: {strategy.confidence_score}"
+                if strategy.confidence_score != ph
+                else ph
+            ),
+            available=regime_raw != ph,
+        )
+
+        vix_quote = next((q for q in indices.indices if q.symbol == "INDIA VIX"), None)
+        vix_value = vix_quote.ltp if vix_quote is not None else ph
+        vix_caption = ph
+        vix_num: float | None = None
+        if vix_value != ph:
+            try:
+                vix_num = float(vix_value.replace(",", ""))
+                if vix_num < 15:
+                    vix_caption = "Low Volatility"
+                elif vix_num < 25:
+                    vix_caption = "Moderate Volatility"
+                else:
+                    vix_caption = "High Volatility"
+            except ValueError:
+                vix_caption = ph
+        vix_card = MetricCardView(
+            label="India VIX",
+            value=vix_value,
+            caption=vix_caption,
+            available=vix_value != ph,
+            trend=self._record_metric("india_vix", vix_num),
+        )
+
+        pcr = _compute_put_call_ratio(market.option_chain_rows)
+        pcr_trend = self._record_metric("put_call_ratio", pcr)
+        if pcr is None:
+            pcr_card = MetricCardView(label="Put Call Ratio", available=False, trend=pcr_trend)
+        else:
+            sentiment = (
+                "Bullish Sentiment"
+                if pcr > 1.1
+                else "Bearish Sentiment" if pcr < 0.7 else "Neutral Sentiment"
+            )
+            pcr_card = MetricCardView(
+                label="Put Call Ratio", value=f"{pcr:.2f}", caption=sentiment, trend=pcr_trend
+            )
+
+        max_pain_strike = _compute_max_pain_strike(market.option_chain_rows)
+        max_pain_trend = self._record_metric("max_pain", max_pain_strike)
+        if max_pain_strike is None:
+            max_pain_card = MetricCardView(
+                label="Max Pain (Weekly)", available=False, trend=max_pain_trend
+            )
+        else:
+            caption = ph
+            try:
+                spot = float(market.ltp.replace(",", ""))
+                caption = f"{max_pain_strike - spot:+,.2f} from Spot"
+            except (ValueError, AttributeError):
+                pass
+            max_pain_card = MetricCardView(
+                label="Max Pain (Weekly)",
+                value=f"{max_pain_strike:,.0f}",
+                caption=caption,
+                trend=max_pain_trend,
+            )
+
+        fii_dii_card = MetricCardView(
+            label="FII / DII (Net)",
+            available=False,
+            caption="No FII/DII data feed connected",
+        )
+
+        engines = self._build_engine_status_rows(
+            system=system,
+            strategy=strategy,
+            panel=panel,
+            ledger=ledger,
+            market=market,
+            market_latency_ms=market_latency_ms,
+            system_latency_ms=system_latency_ms,
+            strategy_latency_ms=strategy_latency_ms,
+            ai_latency_ms=ai_latency_ms,
+            ledger_latency_ms=ledger_latency_ms,
+        )
+        running_count = sum(1 for row in engines if row.running)
+        if not engines:
+            overall_health = ph
+        elif running_count == len(engines):
+            overall_health = "EXCELLENT"
+        elif running_count >= len(engines) / 2:
+            overall_health = "DEGRADED"
+        else:
+            overall_health = "CRITICAL"
+
+        oi_calls, oi_puts = _build_oi_buildup_rows(market.option_chain_rows, ph)
+
+        scanner_rows = tuple(
+            ScannerRow(
+                strategy=row.display_name if row.display_name != ph else row.family,
+                score=row.score,
+                signal=row.recommendation_state,
+                confidence=row.confidence,
+            )
+            for row in strategy.strategies
+        )
+
+        alerts = tuple(
+            AlertRow(
+                title=entry.message[:80],
+                detail=entry.logger,
+                timestamp=entry.timestamp,
+                severity=entry.level.lower(),
+            )
+            for entry in logs.entries[:6]
+        )
+
+        return DashboardOverviewView(
+            selected_underlying=(
+                market.selected_underlying if market.selected_underlying != ph else underlying
+            ),
+            as_of=system.as_of.strftime("%d %b %Y %H:%M:%S") if system.as_of else ph,
+            market_regime=regime_card,
+            india_vix=vix_card,
+            put_call_ratio=pcr_card,
+            max_pain=max_pain_card,
+            fii_dii=fii_dii_card,
+            chart=chart,
+            breadth_available=False,
+            engines=engines,
+            engines_overall_health=overall_health,
+            oi_buildup_calls=oi_calls,
+            oi_buildup_puts=oi_puts,
+            scanner_rows=scanner_rows,
+            alerts=alerts,
+            broker_connected=system.broker_status == "CONNECTED",
+            system_operational=system.system_status == "RUNNING",
+            source="live" if market.source == "live" else "offline",
+        )
+
+    def _build_engine_status_rows(
+        self,
+        *,
+        system: FacadeSystemStatus,
+        strategy: FacadeStrategyStatus,
+        panel: object | None,
+        ledger: FacadePaperTradingLedger,
+        market: FacadeMarketSnapshot,
+        market_latency_ms: float,
+        system_latency_ms: float,
+        strategy_latency_ms: float,
+        ai_latency_ms: float,
+        ledger_latency_ms: float,
+    ) -> tuple[EngineStatusRow, ...]:
+        """Build Engine Status rows from real component health and real
+        measured response times of the actual dashboard read calls above.
+
+        Rows without a standalone long-running component (Risk, Position
+        Sizing, Greeks/OI) are derived from whether the latest real
+        decision/snapshot data they depend on is actually present this
+        cycle — never a fabricated running/latency value.
+        """
+        ph = self._config.placeholder
+
+        def _fmt(ms: float) -> str:
+            return f"{ms:.0f}ms"
+
+        ai_running = panel is not None and _attr(panel, "decision_status", ph) != ph
+        risk_running = panel is not None and _attr(panel, "risk_verdict", ph) != ph
+        sizing_running = panel is not None and bool(_attr(panel, "reasons", ()))
+        greeks_running = any(
+            len(row) > 9 and row[9] not in (ph, "", None) for row in market.option_chain_rows
+        )
+
+        return (
+            EngineStatusRow("Market Data Engine", market.source == "live", _fmt(market_latency_ms)),
+            EngineStatusRow(
+                "Broker Connection", system.broker_status == "CONNECTED", _fmt(system_latency_ms)
+            ),
+            EngineStatusRow("AI Decision Engine", ai_running, _fmt(ai_latency_ms)),
+            EngineStatusRow("Risk Engine", risk_running, _fmt(ai_latency_ms)),
+            EngineStatusRow("Position Sizing Engine", sizing_running, _fmt(ai_latency_ms)),
+            EngineStatusRow(
+                "Strategy Intelligence Engine", strategy.source == "live", _fmt(strategy_latency_ms)
+            ),
+            EngineStatusRow("Greeks & OI Pipeline", greeks_running, _fmt(market_latency_ms)),
+            EngineStatusRow("Paper Trading Engine", ledger.source == "live", _fmt(ledger_latency_ms)),
         )
 
     def _fetch_strategy_status(self) -> FacadeStrategyStatus:
@@ -3605,9 +4034,22 @@ class PresentationFacadeAdapter:
         """Expose AI reasoning/countdown soft-read through the presentation adapter."""
         return self._facade.get_ai_panel()
 
-    def get_market_chart(self, underlying: str) -> MarketChartView:
+    def get_market_chart(
+        self,
+        underlying: str,
+        *,
+        fast_span: int = 9,
+        slow_span: int = 21,
+        timeframe: str = "1D",
+    ) -> MarketChartView:
         """Expose the real candlestick/EMA/VWAP chart series through the adapter."""
-        return self._facade.get_market_chart(underlying)
+        return self._facade.get_market_chart(
+            underlying, fast_span=fast_span, slow_span=slow_span, timeframe=timeframe
+        )
+
+    def get_dashboard_overview(self, underlying: str = "NIFTY") -> DashboardOverviewView:
+        """Expose the composed Home / Dashboard Overview snapshot through the adapter."""
+        return self._facade.get_dashboard_overview(underlying)
 
     def get_market_snapshot(self) -> MarketPageView:
         """Compose Market page view from market, indices, and regime reads."""

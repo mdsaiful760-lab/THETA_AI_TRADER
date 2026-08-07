@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -10,9 +11,11 @@ import streamlit as st
 from dashboard import DASHBOARD_VERSION, default_dashboard_ui_config
 from dashboard.components.error_banner import render_error
 from dashboard.components.sidebar import render_sidebar
+from dashboard.components.topbar import render_topbar
 from dashboard.facade import DashboardBackendFacade
 from dashboard.live_session_adapter import build_default_presentation_facade
 from dashboard.pages import PAGE_REGISTRY
+from dashboard.pages.home import resolve_home_indices
 from dashboard.session_state import ensure_session_state, get_session_view, set_last_error
 from dashboard.theme import apply_theme, configure_page
 from dashboard.view_models import DashboardRenderContext
@@ -53,6 +56,18 @@ def build_render_context(
     )
 
 
+_ALERT_LEVELS = frozenset({"WARN", "WARNING", "ERROR", "CRITICAL"})
+
+
+def _real_alert_count(ctx: DashboardRenderContext) -> int:
+    """Return the real count of WARN+/ERROR+ log entries for the top bar bell."""
+    try:
+        logs = ctx.facade.get_logs(limit=50)
+        return sum(1 for entry in logs.entries if entry.level.strip().upper() in _ALERT_LEVELS)
+    except Exception:  # noqa: BLE001 - shell must not crash
+        return 0
+
+
 def resolve_page(page_id: str):
     """Resolve a page id to a registered page object.
 
@@ -77,7 +92,19 @@ def main() -> None:
     apply_theme()
     ensure_session_state(default_page=config.default_page)
     ctx = build_render_context()
+    render_topbar(
+        ctx,
+        indices=resolve_home_indices(ctx),
+        broker_connected=ctx.facade.get_runtime_state().broker_status == "CONNECTED",
+        alert_count=_real_alert_count(ctx),
+    )
     render_sidebar(ctx)
+    # render_sidebar() may have just written a new active_page into session
+    # state (e.g. the user clicked a different nav item this rerun) — ctx
+    # is an immutable snapshot taken before that write, so it must be
+    # refreshed here or the page resolved below would always be one click
+    # behind the sidebar selection.
+    ctx = replace(ctx, session=get_session_view())
     render_error(ctx.session.last_error)
     page = resolve_page(ctx.session.active_page)
     try:

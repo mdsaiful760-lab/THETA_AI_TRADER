@@ -1,6 +1,9 @@
-"""Sidebar navigation, status, and lifecycle controls."""
+"""Grouped sidebar navigation, status, and lifecycle controls."""
 
 from __future__ import annotations
+
+import getpass
+import html
 
 import streamlit as st
 
@@ -14,52 +17,105 @@ from dashboard.session_state import (
 )
 from dashboard.view_models import DashboardRenderContext
 
-PAGE_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("home", "Home"),
-    ("market", "Market"),
-    ("strategy_monitor", "Strategy Monitor"),
-    ("paper_trading", "Paper Trading"),
-    ("orders", "Orders"),
-    ("portfolio", "Portfolio"),
-    ("risk", "Risk"),
-    ("apme", "APME"),
-    ("logs", "Logs"),
-    ("analytics", "Analytics"),
-    ("settings", "Settings"),
+# (group_label, ((page_id, display_label, icon), ...)) — group_label is
+# ``None`` for the standalone top-level "Dashboard" entry.
+NAV_GROUPS: tuple[tuple[str | None, tuple[tuple[str, str, str], ...]], ...] = (
+    (None, (("home", "Dashboard", "🏠"),)),
+    (
+        "Market Intelligence",
+        (
+            ("market_regime", "Market Regime", "🧭"),
+            ("greeks", "Greeks Intelligence", "🔬"),
+            ("liquidity", "Liquidity Analysis", "💧"),
+            ("volatility", "Volatility Surface", "📉"),
+            ("option_chain", "Option Chain", "⛓️"),
+            ("heatmap", "Market Heatmap", "🔥"),
+        ),
+    ),
+    (
+        "Strategy Intelligence",
+        (
+            ("scanner", "Strategy Scanner", "🔍"),
+            ("builder", "Strategy Builder", "🛠️"),
+            ("backtesting", "Backtesting", "⏱️"),
+            ("library", "Strategy Library", "📚"),
+        ),
+    ),
+    (
+        "Risk & Portfolio",
+        (
+            ("risk_dashboard", "Risk Dashboard", "⚠️"),
+            ("position_sizing", "Position Sizing", "⚖️"),
+            ("portfolio", "Portfolio Overview", "💼"),
+            ("exposure", "Exposure Analysis", "🎯"),
+        ),
+    ),
+    (
+        "Execution",
+        (
+            ("trade_execution", "Trade Execution", "⚡"),
+            ("orders", "Orders", "🧾"),
+            ("positions", "Positions", "📍"),
+            ("trade_log", "Trade Log", "📜"),
+        ),
+    ),
+    (
+        "System",
+        (
+            ("engine_status", "Engine Status", "🖥️"),
+            ("logs", "Logs", "🗒️"),
+            ("settings", "Settings", "⚙️"),
+        ),
+    ),
 )
 
+PAGE_OPTIONS: tuple[tuple[str, str], ...] = tuple(
+    (page_id, label) for _group, items in NAV_GROUPS for page_id, label, _icon in items
+)
 PAGE_LABELS: dict[str, str] = dict(PAGE_OPTIONS)
 PAGE_IDS: tuple[str, ...] = tuple(page_id for page_id, _ in PAGE_OPTIONS)
 
 
 def render_sidebar(ctx: DashboardRenderContext) -> None:
-    """Render sidebar navigation, status badges, and lifecycle controls.
+    """Render grouped sidebar navigation, status badges, and lifecycle controls.
 
     Args:
         ctx: Dashboard render context.
     """
     health = ctx.facade.get_health()
     runtime = ctx.facade.get_runtime_state()
+    active_page = ctx.session.active_page
 
     with st.sidebar:
         st.markdown(
-            f"<div class='theta-brand'>{ctx.config.app_title}</div>",
+            (
+                "<div class='theta-topbar-brand' style='margin-bottom:0.4rem;'>"
+                "<span class='theta-brand-mark'>&#920;</span>"
+                f"<div><div class='theta-brand'>{html.escape(ctx.config.app_title)}</div>"
+                f"<span style='color:var(--theta-muted-dim);font-size:0.68rem;'>"
+                f"v{ctx.version}</span></div>"
+                "</div>"
+            ),
             unsafe_allow_html=True,
         )
-        st.caption(f"v{ctx.version} · schema {ctx.config.schema_version}")
 
-        labels = [label for _, label in PAGE_OPTIONS]
-        ids = [page_id for page_id, _ in PAGE_OPTIONS]
-        current_index = ids.index(ctx.session.active_page) if ctx.session.active_page in ids else 0
-        selected_label = st.radio(
-            "Navigation",
-            options=labels,
-            index=current_index,
-            label_visibility="collapsed",
-        )
-        selected_page = ids[labels.index(selected_label)]
-        if selected_page != ctx.session.active_page:
-            set_active_page(selected_page)
+        for group_label, items in NAV_GROUPS:
+            if group_label is not None:
+                st.markdown(
+                    f"<div class='theta-sidebar-group-label'>{html.escape(group_label)}</div>",
+                    unsafe_allow_html=True,
+                )
+            for page_id, label, icon in items:
+                is_active = page_id == active_page
+                if st.button(
+                    f"{icon}  {label}",
+                    key=f"nav_{page_id}",
+                    type="primary" if is_active else "secondary",
+                    use_container_width=True,
+                ):
+                    if page_id != active_page:
+                        set_active_page(page_id)
+                        st.rerun()
 
         st.divider()
         render_status_badges(
@@ -77,6 +133,32 @@ def render_sidebar(ctx: DashboardRenderContext) -> None:
 
         if ctx.config.show_demo_banners and not ctx.facade.is_connected:
             st.info("Demo mode — backend session not connected")
+
+        _render_user_footer()
+
+
+def _render_user_footer() -> None:
+    """Render the sidebar's operator identity chip.
+
+    Uses the real OS account running this process (never a hardcoded
+    name) — this dashboard has no login/auth system of its own.
+    """
+    try:
+        operator = getpass.getuser()
+    except Exception:  # noqa: BLE001
+        operator = "operator"
+    initials = "".join(part[0] for part in operator.replace(".", " ").split()[:2]).upper() or "OP"
+    st.markdown(
+        (
+            "<div class='theta-sidebar-user'>"
+            f"<div class='theta-sidebar-user-avatar'>{html.escape(initials)}</div>"
+            "<div>"
+            f"<div class='theta-sidebar-user-name'>{html.escape(operator)}</div>"
+            "<div class='theta-sidebar-user-role'>Operator</div>"
+            "</div></div>"
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 def _render_controls(ctx: DashboardRenderContext, system_status: str) -> None:

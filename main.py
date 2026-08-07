@@ -25,7 +25,12 @@ from system.live_runtime_bootstrap import bootstrap_live_runtime
 _LOGGER = logging.getLogger("main")
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-_DASHBOARD_SCRIPT = os.path.join(_REPO_ROOT, "dashboard", "app.py")
+# dashboard_entry.py (repo root) wraps dashboard/app.py — launching
+# Streamlit directly against dashboard/app.py would trigger Streamlit's
+# automatic pages/-folder navigation on the dashboard.pages Python
+# package (a plain module package, not standalone MPA scripts) and
+# replace our custom sidebar with Streamlit's own file-list UI.
+_DASHBOARD_SCRIPT = os.path.join(_REPO_ROOT, "dashboard_entry.py")
 _ENV_FILE = os.path.join(_REPO_ROOT, ".env")
 
 

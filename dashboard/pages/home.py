@@ -1,4 +1,4 @@
-"""Home trading terminal page."""
+"""Dashboard Overview (Home) page — institutional trading-terminal landing page."""
 
 from __future__ import annotations
 
@@ -7,29 +7,32 @@ import logging
 import streamlit as st
 
 from dashboard.components.error_banner import render_error
-from dashboard.components.index_ticker import render_index_strip
-from dashboard.components.kpi_cards import render_kpi_row
 from dashboard.components.lightweight_chart import render_lightweight_chart
-from dashboard.components.page_header import render_page_header
-from dashboard.dashboard_facade import (
-    FacadeHomeMarketIndices,
-    HomeIndexQuote,
-    home_indices_to_quote_views,
+from dashboard.components.overview_widgets import (
+    render_alerts,
+    render_engine_status,
+    render_footer_bar,
+    render_market_breadth_placeholder,
+    render_metric_cards,
+    render_oi_buildup,
+    render_strategy_scanner,
 )
+from dashboard.components.page_header import render_page_header
+from dashboard.dashboard_facade import FacadeHomeMarketIndices, HomeIndexQuote, home_indices_to_quote_views
 from dashboard.utils.autorefresh import live_fragment
 from dashboard.view_models import (
+    DashboardOverviewView,
     DashboardRenderContext,
-    HomeKpiView,
     IndexQuoteView,
     MarketChartView,
     PLACEHOLDER,
     default_index_quotes,
-    home_kpi_cards,
 )
 
-_DEFAULT_CHART_UNDERLYING = "NIFTY"
-
 _logger = logging.getLogger("dashboard.pages.home")
+
+_CHART_UNDERLYINGS: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "SENSEX")
+_TIMEFRAMES: tuple[str, ...] = ("1D", "5D", "1M", "3M", "6M", "1Y")
 
 
 def _payload_to_views(payload: object) -> tuple[IndexQuoteView, ...] | None:
@@ -62,14 +65,17 @@ def _payload_to_views(payload: object) -> tuple[IndexQuoteView, ...] | None:
     return tuple(quotes) if quotes else None
 
 
-def _resolve_home_indices(ctx: DashboardRenderContext) -> tuple[IndexQuoteView, ...]:
+def resolve_home_indices(ctx: DashboardRenderContext) -> tuple[IndexQuoteView, ...]:
     """Load Home index quotes exclusively via DashboardFacade methods.
+
+    Shared with the top bar's live ticker so both read the same real,
+    already-cached snapshot.
 
     Args:
         ctx: Render context with facade.
 
     Returns:
-        Four index quote views (placeholders on failure).
+        Real index quote views (placeholders on failure).
     """
     facade = ctx.facade
     try:
@@ -87,133 +93,135 @@ def _resolve_home_indices(ctx: DashboardRenderContext) -> tuple[IndexQuoteView, 
     return default_index_quotes(ctx.config.index_symbols)
 
 
-def _render_home_market_strip(ctx: DashboardRenderContext) -> None:
-    """Render the Home market index strip (re-read on every call)."""
-    indices = _resolve_home_indices(ctx)
-    render_index_strip(indices)
+def _selected_underlying() -> str:
+    """Return the real, session-persisted underlying selection."""
+    return st.session_state.get("home_underlying", "NIFTY")
 
 
-def _enable_home_market_autorefresh(ctx: DashboardRenderContext) -> None:
-    """Live-refresh the Home market strip in place — never the whole page."""
-    if not ctx.config.enable_home_market_autorefresh:
-        _render_home_market_strip(ctx)
-        return
-    live_fragment(
-        lambda: _render_home_market_strip(ctx),
-        interval_seconds=ctx.config.home_market_refresh_seconds,
-        key="home_market_refresh",
-    )
+def _render_header_controls(ctx: DashboardRenderContext) -> str:
+    """Render the underlying selector + date, return the selected underlying."""
+    _left, right = st.columns([3, 1])
+    with right:
+        underlying = st.selectbox(
+            "Underlying",
+            options=_CHART_UNDERLYINGS,
+            index=_CHART_UNDERLYINGS.index(_selected_underlying())
+            if _selected_underlying() in _CHART_UNDERLYINGS
+            else 0,
+            key="home_underlying",
+            label_visibility="collapsed",
+        )
+        st.caption(ctx.clock().strftime("%d %b %Y"))
+    return underlying
 
 
-def _render_ai_panel(ctx: DashboardRenderContext) -> None:
-    """Render the AI reasoning panel from already-computed decision output."""
-    getter = getattr(ctx.facade, "get_ai_panel", None)
-    panel = getter() if callable(getter) else None
-    st.markdown("**AI Reasoning**")
-    if panel is None:
-        st.info("Awaiting backend AI decision loop")
-        return
-
-    countdown = getattr(panel, "next_evaluation_display", PLACEHOLDER)
-    decision_status = getattr(panel, "decision_status", PLACEHOLDER)
-    risk_verdict = getattr(panel, "risk_verdict", PLACEHOLDER)
-    st.markdown(
-        (
-            f"<div class='theta-status-row'>"
-            f"<span class='theta-status-label'>Next evaluation in</span>"
-            f"<span class='theta-countdown'>{countdown}</span>"
-            f"</div>"
-        ),
-        unsafe_allow_html=True,
-    )
-    st.caption(f"Decision: {decision_status} · Risk: {risk_verdict}")
-
-    reasons = getattr(panel, "reasons", ())
-    if reasons:
-        items = "".join(f"<li>{reason}</li>" for reason in reasons)
-        st.markdown(f"<ul class='theta-reasoning-list'>{items}</ul>", unsafe_allow_html=True)
-    else:
-        st.caption("No reasoning recorded for the latest cycle")
+def _resolve_overview(ctx: DashboardRenderContext, underlying: str) -> DashboardOverviewView:
+    """Load the composed Dashboard Overview snapshot for ``underlying``."""
+    getter = getattr(ctx.facade, "get_dashboard_overview", None)
+    if not callable(getter):
+        return DashboardOverviewView(selected_underlying=underlying, source="offline")
+    try:
+        result = getter(underlying)
+        if isinstance(result, DashboardOverviewView):
+            return result
+    except Exception as exc:  # noqa: BLE001 - Home must not crash
+        _logger.warning("dashboard overview unavailable: %s", exc)
+        render_error(f"Dashboard overview unavailable: {exc}")
+    return DashboardOverviewView(selected_underlying=underlying, source="offline")
 
 
-def _resolve_primary_chart(ctx: DashboardRenderContext) -> MarketChartView:
-    """Load the real candlestick/EMA/VWAP series for the AI's configured underlying.
-
-    Uses the AI panel's own real ``underlying`` field when a decision has
-    run; otherwise falls back to the platform default. Optional capability
-    — present only when the facade exposes ``get_market_chart``.
-    """
-    underlying = _DEFAULT_CHART_UNDERLYING
-    panel_getter = getattr(ctx.facade, "get_ai_panel", None)
-    panel = panel_getter() if callable(panel_getter) else None
-    panel_underlying = getattr(panel, "underlying", None) if panel is not None else None
-    if panel_underlying and panel_underlying != PLACEHOLDER:
-        underlying = panel_underlying
-
-    chart_getter = getattr(ctx.facade, "get_market_chart", None)
-    if not callable(chart_getter):
+def _resolve_trend_chart(
+    ctx: DashboardRenderContext, underlying: str, timeframe: str
+) -> MarketChartView:
+    """Load the real candlestick/EMA(20)/EMA(50) series for the trend panel."""
+    getter = getattr(ctx.facade, "get_market_chart", None)
+    if not callable(getter):
         return MarketChartView(underlying=underlying, source="offline")
     try:
-        chart = chart_getter(underlying)
+        chart = getter(underlying, fast_span=20, slow_span=50, timeframe=timeframe)
         if isinstance(chart, MarketChartView):
             return chart
     except Exception as exc:  # noqa: BLE001 - Home must not crash
-        _logger.warning("home chart unavailable: %s", exc)
+        _logger.warning("home trend chart unavailable: %s", exc)
     return MarketChartView(underlying=underlying, source="offline")
 
 
-def _render_chart(ctx: DashboardRenderContext) -> None:
-    """Render the primary underlying's real candlestick chart."""
-    chart = _resolve_primary_chart(ctx)
-    render_lightweight_chart(chart)
+def _render_trend_panel(ctx: DashboardRenderContext, underlying: str) -> None:
+    """Render the Market Trend panel with real timeframe tabs."""
+    st.markdown(
+        f"<div class='theta-panel-title'>Market Trend ({underlying})</div>",
+        unsafe_allow_html=True,
+    )
+    timeframe = st.segmented_control(
+        "Timeframe",
+        options=_TIMEFRAMES,
+        default="1D",
+        key="home_chart_timeframe",
+        label_visibility="collapsed",
+    ) or "1D"
+    chart = _resolve_trend_chart(ctx, underlying, timeframe)
+    if chart.candles:
+        _t, o, h, l, c, _v = chart.candles[-1]
+        st.caption(f"O {o:,.2f}  H {h:,.2f}  L {l:,.2f}  C {c:,.2f}")
+    render_lightweight_chart(chart, height=420)
 
 
-def _enable_chart_autorefresh(ctx: DashboardRenderContext) -> None:
-    """Live-refresh the primary chart in place — never the whole page."""
-    if not ctx.config.enable_autorefresh:
-        _render_chart(ctx)
-        return
-    live_fragment(
-        lambda: _render_chart(ctx),
-        interval_seconds=ctx.config.refresh_interval_seconds,
-        key="home_chart_refresh",
+def _render_body(ctx: DashboardRenderContext) -> None:
+    """Render the full Dashboard Overview body (re-invoked on every live refresh)."""
+    underlying = _render_header_controls(ctx)
+    overview = _resolve_overview(ctx, underlying)
+
+    render_metric_cards(
+        (
+            overview.market_regime,
+            overview.india_vix,
+            overview.put_call_ratio,
+            overview.max_pain,
+            overview.fii_dii,
+        )
     )
 
+    col_chart, col_breadth, col_engine = st.columns([2, 1, 1])
+    with col_chart, st.container(border=True, key="theta_panel_trend"):
+        _render_trend_panel(ctx, underlying)
+    with col_breadth, st.container(border=True, key="theta_panel_breadth"):
+        if overview.breadth_available:
+            st.metric("Advancing", overview.breadth_advancing)
+            st.metric("Declining", overview.breadth_declining)
+            st.metric("Unchanged", overview.breadth_unchanged)
+        else:
+            render_market_breadth_placeholder()
+    with col_engine, st.container(border=True, key="theta_panel_engine"):
+        render_engine_status(overview.engines, overall_health=overview.engines_overall_health)
 
-def _enable_ai_panel_autorefresh(ctx: DashboardRenderContext) -> None:
-    """Live-refresh the AI reasoning panel in place — never the whole page."""
-    if not ctx.config.enable_autorefresh:
-        _render_ai_panel(ctx)
-        return
-    live_fragment(
-        lambda: _render_ai_panel(ctx),
-        interval_seconds=ctx.config.refresh_interval_seconds,
-        key="ai_panel_refresh",
+    col_oi, col_scanner, col_alerts = st.columns(3)
+    with col_oi, st.container(border=True, key="theta_panel_oi"):
+        render_oi_buildup(overview.oi_buildup_calls, overview.oi_buildup_puts)
+    with col_scanner, st.container(border=True, key="theta_panel_scanner"):
+        render_strategy_scanner(overview.scanner_rows)
+    with col_alerts, st.container(border=True, key="theta_panel_alerts"):
+        render_alerts(overview.alerts)
+
+    render_footer_bar(
+        broker_connected=overview.broker_connected,
+        as_of=overview.as_of,
+        system_operational=overview.system_operational,
+        version=ctx.version,
     )
 
 
 def render(ctx: DashboardRenderContext) -> None:
-    """Render the home trading terminal page.
+    """Render the Dashboard Overview (Home) page.
 
     Args:
         ctx: Immutable render context with facade and session handles.
     """
-    render_page_header("Trading Terminal", "Primary operator console")
-    _enable_home_market_autorefresh(ctx)
-
-    cycle_summary: str | None = None
-    try:
-        snapshot = ctx.facade.get_home_snapshot()
-        render_kpi_row(home_kpi_cards(snapshot.kpis))
-        cycle_summary = snapshot.cycle_summary
-    except Exception as exc:  # noqa: BLE001
-        _logger.warning("home snapshot unavailable: %s", exc)
-        render_kpi_row(home_kpi_cards(HomeKpiView()))
-
-    _enable_chart_autorefresh(ctx)
-    if cycle_summary:
-        st.caption(cycle_summary)
-    else:
-        st.caption("Awaiting backend cycle summary")
-
-    _enable_ai_panel_autorefresh(ctx)
+    render_page_header("Dashboard Overview", "Real-time intelligence from THETA AI engines")
+    if not ctx.config.enable_autorefresh:
+        _render_body(ctx)
+        return
+    live_fragment(
+        lambda: _render_body(ctx),
+        interval_seconds=ctx.config.refresh_interval_seconds,
+        key="dashboard_overview_refresh",
+    )

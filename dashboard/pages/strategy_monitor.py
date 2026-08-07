@@ -312,7 +312,7 @@ def render(ctx: DashboardRenderContext) -> None:
         ctx: Immutable render context with facade and session handles.
     """
     render_page_header(
-        "Strategy Monitor",
+        "Strategy Scanner",
         "Last strategy evaluation snapshot (read-only)",
     )
     if not ctx.config.enable_autorefresh:

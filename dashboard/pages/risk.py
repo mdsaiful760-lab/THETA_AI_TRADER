@@ -46,7 +46,7 @@ def render(ctx: DashboardRenderContext) -> None:
     Args:
         ctx: Immutable render context with facade and session handles.
     """
-    render_page_header("Risk", "Last verdict and configured limits")
+    render_page_header("Risk Dashboard", "Last verdict and configured limits")
     if not ctx.config.enable_autorefresh:
         _render_body(ctx)
         return

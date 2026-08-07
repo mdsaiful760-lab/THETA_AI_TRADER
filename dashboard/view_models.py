@@ -212,6 +212,116 @@ class MarketChartView:
 
 
 @dataclass(frozen=True)
+class MetricCardView:
+    """One top-row analytics card (Market Regime / VIX / PCR / Max Pain / FII-DII).
+
+    Attributes:
+        label: Card title.
+        value: Primary real value display, or ``PLACEHOLDER`` when the
+            underlying data source does not exist on this platform.
+        caption: Short derived/classification caption for ``value``.
+        available: ``False`` when this metric has no real backing data
+            source at all (e.g. FII/DII flows) — the page must render an
+            honest "not available" state rather than a fabricated number.
+        trend: Sparkline series as plain floats (real historical readings
+            captured by the dashboard; empty when unavailable).
+    """
+
+    label: str
+    value: str = PLACEHOLDER
+    caption: str = PLACEHOLDER
+    available: bool = True
+    trend: tuple[float, ...] = ()
+
+
+@dataclass(frozen=True)
+class EngineStatusRow:
+    """One row in the Engine Status table.
+
+    Attributes:
+        name: Component/pipeline-stage display name.
+        running: Real observed running/healthy state.
+        latency_display: Real measured latency for this domain's dashboard
+            read (round-trip of the actual backend accessor call) —
+            ``PLACEHOLDER`` when the component is not registered.
+    """
+
+    name: str
+    running: bool = False
+    latency_display: str = PLACEHOLDER
+
+
+@dataclass(frozen=True)
+class OiBuildupRow:
+    """One row in the Top OI Build-up table."""
+
+    strike: str = PLACEHOLDER
+    open_interest: str = PLACEHOLDER
+    change_percent: str = PLACEHOLDER
+    ltp: str = PLACEHOLDER
+    trend: str = PLACEHOLDER
+
+
+@dataclass(frozen=True)
+class ScannerRow:
+    """One row in the Strategy Scanner table."""
+
+    strategy: str = PLACEHOLDER
+    score: str = PLACEHOLDER
+    signal: str = PLACEHOLDER
+    confidence: str = PLACEHOLDER
+
+
+@dataclass(frozen=True)
+class AlertRow:
+    """One row in the Recent Alerts feed — sourced from real structured logs."""
+
+    title: str = PLACEHOLDER
+    detail: str = PLACEHOLDER
+    timestamp: str = PLACEHOLDER
+    severity: str = "info"
+
+
+@dataclass(frozen=True)
+class DashboardOverviewView:
+    """Full Home / Dashboard Overview page snapshot.
+
+    Every field is either a real value composed from existing facade reads,
+    a transparent deterministic classification/derivation of a real value
+    (e.g. VIX magnitude -> Low/Moderate/High), or an explicit
+    ``available=False`` / ``PLACEHOLDER`` state when this platform has no
+    real data source for that concept (Market Breadth, FII/DII net flow —
+    both require market-wide feeds this system does not have).
+    """
+
+    selected_underlying: str = PLACEHOLDER
+    as_of: str = PLACEHOLDER
+    market_regime: MetricCardView = field(default_factory=lambda: MetricCardView("Market Regime"))
+    india_vix: MetricCardView = field(default_factory=lambda: MetricCardView("India VIX"))
+    put_call_ratio: MetricCardView = field(
+        default_factory=lambda: MetricCardView("Put Call Ratio")
+    )
+    max_pain: MetricCardView = field(default_factory=lambda: MetricCardView("Max Pain (Weekly)"))
+    fii_dii: MetricCardView = field(
+        default_factory=lambda: MetricCardView("FII / DII (Net)", available=False)
+    )
+    chart: "MarketChartView" = field(default_factory=lambda: MarketChartView())
+    breadth_available: bool = False
+    breadth_advancing: int = 0
+    breadth_declining: int = 0
+    breadth_unchanged: int = 0
+    engines: tuple[EngineStatusRow, ...] = ()
+    engines_overall_health: str = PLACEHOLDER
+    oi_buildup_calls: tuple[OiBuildupRow, ...] = ()
+    oi_buildup_puts: tuple[OiBuildupRow, ...] = ()
+    scanner_rows: tuple[ScannerRow, ...] = ()
+    alerts: tuple[AlertRow, ...] = ()
+    broker_connected: bool = False
+    system_operational: bool = False
+    source: str = "offline"
+
+
+@dataclass(frozen=True)
 class StrategyGateView:
     """Single gate evaluation row for Strategy Monitor display."""
 

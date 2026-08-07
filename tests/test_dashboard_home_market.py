@@ -307,7 +307,7 @@ class TestHomePageResolve:
             clock=lambda: FIXED_NOW,
             version="1.0.0",
         )
-        views = home_page._resolve_home_indices(ctx)
+        views = home_page.resolve_home_indices(ctx)
         assert len(views) == 4
         assert views[0].symbol == "NIFTY"
         assert views[0].connection_status == "OFFLINE"
@@ -328,6 +328,6 @@ class TestHomePageResolve:
             version="1.0.0",
         )
         with patch("dashboard.pages.home.render_error"):
-            views = home_page._resolve_home_indices(ctx)
+            views = home_page.resolve_home_indices(ctx)
         assert len(views) == 4
         assert all(v.connection_status == "OFFLINE" for v in views)
