@@ -7,7 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from dashboard.dashboard_facade import DashboardIntegrationFacade
+from dashboard.dashboard_facade import (
+    DashboardIntegrationFacade,
+    _resample_calendar,
+    _resample_sequential,
+)
 from dashboard.view_models import MarketChartView
 
 FIXED_NOW = datetime(2026, 8, 6, 10, 0, 0, tzinfo=timezone.utc)
@@ -83,14 +87,16 @@ class TestMarketChartLiveCandles:
 
         chart = facade.get_market_chart("NIFTY")
 
-        assert len(chart.ema_fast) == 3
-        assert len(chart.ema_slow) == 3
+        assert len(chart.ema9) == 3
+        assert len(chart.ema20) == 3
+        assert len(chart.ema50) == 3
         assert len(chart.vwap) == 3
         # EMA seeds at the first real close.
-        assert chart.ema_fast[0][1] == pytest.approx(100.0)
-        assert chart.ema_slow[0][1] == pytest.approx(100.0)
+        assert chart.ema9[0][1] == pytest.approx(100.0)
+        assert chart.ema20[0][1] == pytest.approx(100.0)
+        assert chart.ema50[0][1] == pytest.approx(100.0)
         # Second EMA(9) point: k=2/10=0.2 -> 101*0.2 + 100*0.8 = 100.2
-        assert chart.ema_fast[1][1] == pytest.approx(100.2)
+        assert chart.ema9[1][1] == pytest.approx(100.2)
         # VWAP is cumulative(typical*volume)/cumulative(volume) over real bars.
         vwap0 = (101.0 + 99.0 + 100.0) / 3.0
         assert chart.vwap[0][1] == pytest.approx(vwap0)
@@ -108,7 +114,7 @@ class TestMarketChartLiveCandles:
         chart = facade.get_market_chart("NIFTY")
         assert chart.source == "live"
         assert chart.candles == ()
-        assert chart.ema_fast == ()
+        assert chart.ema9 == ()
 
 
 class TestMarketChartAiSignalMarkers:
@@ -173,3 +179,79 @@ class TestMarketChartAiSignalMarkers:
         )
         chart = facade.get_market_chart("NIFTY")
         assert chart.markers == ()
+
+
+class TestCandleResampling:
+    """2H/4H/Weekly/Monthly have no native Kite interval — real OHLCV
+    resampling of real base candles must produce correct aggregates."""
+
+    def test_sequential_resample_groups_real_ohlcv_correctly(self) -> None:
+        candles = (
+            ("2026-08-08T09:15:00+00:00", 100.0, 102.0, 99.0, 101.0, 1000),
+            ("2026-08-08T10:15:00+00:00", 101.0, 103.0, 100.0, 102.0, 1500),
+            ("2026-08-08T11:15:00+00:00", 102.0, 104.0, 101.0, 103.0, 1200),
+            ("2026-08-08T12:15:00+00:00", 103.0, 105.0, 102.0, 104.0, 900),
+        )
+        out = _resample_sequential(candles, 2)
+        assert out == (
+            ("2026-08-08T09:15:00+00:00", 100.0, 103.0, 99.0, 102.0, 2500),
+            ("2026-08-08T11:15:00+00:00", 102.0, 105.0, 101.0, 104.0, 2100),
+        )
+
+    def test_sequential_resample_drops_incomplete_trailing_group(self) -> None:
+        candles = (
+            ("2026-08-08T09:15:00+00:00", 100.0, 101.0, 99.0, 100.5, 100),
+            ("2026-08-08T10:15:00+00:00", 100.5, 102.0, 100.0, 101.5, 110),
+            ("2026-08-08T11:15:00+00:00", 101.5, 103.0, 101.0, 102.5, 120),
+        )
+        out = _resample_sequential(candles, 2)
+        # 3 candles / group size 2 -> one full 2-candle bar + a real
+        # (not fabricated) partial trailing bar from the remaining candle.
+        assert len(out) == 2
+        assert out[1] == ("2026-08-08T11:15:00+00:00", 101.5, 103.0, 101.0, 102.5, 120)
+
+    def test_calendar_week_resample_groups_by_real_iso_week(self) -> None:
+        daily = (
+            ("2026-08-03T00:00:00+00:00", 100.0, 101.0, 99.0, 100.5, 100),
+            ("2026-08-04T00:00:00+00:00", 100.5, 102.0, 100.0, 101.5, 110),
+            ("2026-08-10T00:00:00+00:00", 101.5, 103.0, 101.0, 102.5, 120),
+        )
+        out = _resample_calendar(daily, "week")
+        assert out == (
+            ("2026-08-03T00:00:00+00:00", 100.0, 102.0, 99.0, 101.5, 210),
+            ("2026-08-10T00:00:00+00:00", 101.5, 103.0, 101.0, 102.5, 120),
+        )
+
+    def test_calendar_month_resample_groups_by_real_calendar_month(self) -> None:
+        daily = (
+            ("2026-07-30T00:00:00+00:00", 100.0, 101.0, 99.0, 100.5, 100),
+            ("2026-07-31T00:00:00+00:00", 100.5, 102.0, 100.0, 101.5, 110),
+            ("2026-08-03T00:00:00+00:00", 101.5, 103.0, 101.0, 102.5, 120),
+        )
+        out = _resample_calendar(daily, "month")
+        assert out == (
+            ("2026-07-30T00:00:00+00:00", 100.0, 102.0, 99.0, 101.5, 210),
+            ("2026-08-03T00:00:00+00:00", 101.5, 103.0, 101.0, 102.5, 120),
+        )
+
+    def test_get_market_chart_2h_timeframe_resamples_real_hourly_candles(self) -> None:
+        hourly_rows = tuple(
+            {
+                "date": FIXED_NOW + timedelta(hours=i),
+                "open": 100.0 + i, "high": 101.0 + i, "low": 99.0 + i,
+                "close": 100.5 + i, "volume": 100,
+            }
+            for i in range(4)
+        )
+        session = SimpleNamespace(
+            get_underlying_candles=lambda underlying, interval=None, lookback=None: SimpleNamespace(
+                underlying=underlying, interval=interval, candles=hourly_rows
+            )
+        )
+        facade = DashboardIntegrationFacade(session=session, clock=lambda: FIXED_NOW)
+
+        chart = facade.get_market_chart("NIFTY", timeframe="2H")
+
+        assert chart.source == "live"
+        assert len(chart.candles) == 2
+        assert chart.interval == "2H"

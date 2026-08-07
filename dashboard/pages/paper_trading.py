@@ -33,6 +33,7 @@ _POSITION_COLUMNS: tuple[str, ...] = (
     "Entry",
     "Current",
     "MTM",
+    "Exposure",
     "Status",
 )
 
@@ -157,6 +158,27 @@ def _account_summary_cards(view: PaperTradingPageView) -> tuple[KpiCardModel, ..
     )
 
 
+def _terminal_summary_cards(view: PaperTradingPageView) -> tuple[KpiCardModel, ...]:
+    """Build the trading-terminal top row: Capital/Available/Used Margin/PnL/ROI.
+
+    Args:
+        view: Paper trading page snapshot.
+
+    Returns:
+        Five KPI cards in the terminal's above-the-fold display order.
+    """
+    available_margin = (
+        view.available_cash if view.available_cash != PLACEHOLDER else view.virtual_cash
+    )
+    return (
+        KpiCardModel("Capital", view.total_equity),
+        KpiCardModel("Available Margin", available_margin),
+        KpiCardModel("Used Margin", view.capital_used),
+        KpiCardModel("Today's PnL", view.todays_pnl),
+        KpiCardModel("ROI", view.roi),
+    )
+
+
 def _positions_frame(view: PaperTradingPageView) -> pd.DataFrame:
     """Build the open positions DataFrame.
 
@@ -180,6 +202,7 @@ def _positions_frame(view: PaperTradingPageView) -> pd.DataFrame:
                     _attr(row, "current", "mark", default=PLACEHOLDER)
                 ),
                 "MTM": _display(_attr(row, "mtm", "pnl", default=PLACEHOLDER)),
+                "Exposure": _display(_attr(row, "exposure", default=PLACEHOLDER)),
                 "Status": _display(_attr(row, "status", default=PLACEHOLDER)),
             }
         )
@@ -638,8 +661,10 @@ def _render_paper_body(ctx: DashboardRenderContext) -> None:
     snapshot = _resolve_paper_view(ctx)
     analytics = _resolve_analytics(ctx.facade)
 
-    st.subheader("Paper account summary")
-    render_kpi_row(_account_summary_cards(snapshot))
+    # Trading-terminal layout: Capital/Margin/PnL/ROI up top, open positions
+    # in the middle, execution timeline at the bottom — the primary
+    # above-the-fold view. Richer supplementary analytics follow beneath.
+    render_kpi_row(_terminal_summary_cards(snapshot))
     if _is_empty_account(snapshot):
         st.info("Empty paper portfolio — awaiting backend ledger")
 
@@ -722,6 +747,7 @@ __all__ = (
     "render",
     "_resolve_paper_view",
     "_account_summary_cards",
+    "_terminal_summary_cards",
     "_positions_frame",
     "_orders_frame",
     "_execution_timeline_frame",

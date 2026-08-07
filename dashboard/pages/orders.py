@@ -63,6 +63,28 @@ _STATUS_COLORS: dict[str, str] = {
 _DEFAULT_STATUS_COLOR: str = "#3D8BFF"
 
 
+def _style_by_status(df: pd.DataFrame) -> "pd.io.formats.style.Styler | pd.DataFrame":
+    """Apply real Status-driven row color coding — same palette as the timeline.
+
+    Pure display styling — never mutates order data or recomputes status.
+
+    Args:
+        df: Orders dataframe with a ``Status`` column.
+
+    Returns:
+        Styled dataframe (or the original when empty / no Status column).
+    """
+    if df.empty or "Status" not in df.columns:
+        return df
+
+    def _row_style(row: pd.Series) -> list[str]:
+        color = _STATUS_COLORS.get(str(row.get("Status", "")).strip().upper(), _DEFAULT_STATUS_COLOR)
+        # Low-alpha background tint keeps text legible while still color-coding the row.
+        return [f"background-color: {color}22" for _ in row]
+
+    return df.style.apply(_row_style, axis=1)
+
+
 def _display(value: object | None, placeholder: str = PLACEHOLDER) -> str:
     """Format an optional upstream value for display.
 
@@ -334,7 +356,7 @@ def _render_orders_table_section(
     except Exception:  # noqa: BLE001 - page must not crash
         filtered_df = df
 
-    render_table(filtered_df)
+    render_table(_style_by_status(filtered_df), height=420)
     if df.empty:
         st.caption(empty_caption)
     elif filtered_df.empty:

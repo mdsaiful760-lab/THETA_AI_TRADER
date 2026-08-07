@@ -18,6 +18,7 @@ from dashboard.view_models import (
     ApmeDecisionView,
     ApmePageView,
     ChartMarkerView,
+    ChartPriceLineView,
     DashboardOverviewView,
     EngineStatusRow,
     FacadeActionResult,
@@ -57,18 +58,36 @@ HOME_MARKET_INDEX_SYMBOLS: tuple[str, ...] = (
     "INDIA VIX",
 )
 
-# Real broker interval + lookback span per chart timeframe tab. Every value
-# is a genuine Kite historical-data interval string — never fabricated.
-_TIMEFRAME_PRESETS: Mapping[str, tuple[str, timedelta]] = MappingProxyType(
+# Real broker interval + lookback span + optional resample factor per chart
+# timeframe. Every base interval is a genuine Kite historical-data interval
+# string. Kite has no native 2H/4H/Weekly/Monthly interval, so those are
+# built by resampling real, already-fetched base candles (sequential
+# grouping for 2H/4H, real calendar-week/month bucketing for Weekly/
+# Monthly) — pure OHLCV aggregation of real data, never fabricated, never
+# a trading decision.
+#
+# value: (base_interval, lookback, resample) where resample is:
+#   None        -> use the base interval's candles directly
+#   int N       -> group every N consecutive real base candles into one
+#   "week"      -> group real daily candles by real ISO calendar week
+#   "month"     -> group real daily candles by real calendar month
+_TIMEFRAME_PRESETS: Mapping[str, tuple[str, timedelta, "int | str | None"]] = MappingProxyType(
     {
-        "1D": ("5minute", timedelta(days=1)),
-        "5D": ("15minute", timedelta(days=5)),
-        "1M": ("60minute", timedelta(days=30)),
-        "3M": ("day", timedelta(days=90)),
-        "6M": ("day", timedelta(days=180)),
-        "1Y": ("day", timedelta(days=365)),
+        "1m": ("minute", timedelta(days=1), None),
+        "3m": ("3minute", timedelta(days=2), None),
+        "5m": ("5minute", timedelta(days=5), None),
+        "10m": ("10minute", timedelta(days=5), None),
+        "15m": ("15minute", timedelta(days=10), None),
+        "30m": ("30minute", timedelta(days=20), None),
+        "1H": ("60minute", timedelta(days=30), None),
+        "2H": ("60minute", timedelta(days=60), 2),
+        "4H": ("60minute", timedelta(days=120), 4),
+        "Daily": ("day", timedelta(days=730), None),
+        "Weekly": ("day", timedelta(days=1095), "week"),
+        "Monthly": ("day", timedelta(days=1825), "month"),
     }
 )
+_DEFAULT_CHART_TIMEFRAME = "5m"
 
 # Column labels for get_liquidity_rows() — order matches _compute_liquidity_rows.
 LIQUIDITY_COLUMNS: tuple[str, ...] = (
@@ -217,6 +236,10 @@ class FacadeStrategyRow:
     rank: str = PLACEHOLDER
     recommendation_state: str = PLACEHOLDER
     detail_summary: str = PLACEHOLDER
+    # Real, already-computed by the strategy evaluation engine when present
+    # on the upstream report (StrategyEvaluationReport.expected_pop) —
+    # relayed only, never recomputed here.
+    expected_pop: str = PLACEHOLDER
     gates: tuple[FacadeStrategyGate, ...] = ()
     legs: tuple[FacadeStrategyLeg, ...] = ()
 
@@ -315,6 +338,8 @@ class FacadeMarketSnapshot:
     option_chain_columns: tuple[str, ...]
     option_chain_rows: tuple[tuple[str, ...], ...]
     atm_strike: str = "—"
+    nearest_expiry: str = "—"
+    ai_selected_strikes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -381,6 +406,7 @@ class FacadePaperLedgerPosition:
     current: str = PLACEHOLDER
     mtm: str = PLACEHOLDER
     status: str = PLACEHOLDER
+    exposure: str = PLACEHOLDER
 
 
 @dataclass(frozen=True)
@@ -616,6 +642,7 @@ def empty_market_snapshot(
         option_chain_columns=MarketPageView.option_chain_columns,
         option_chain_rows=(),
         atm_strike=placeholder,
+        nearest_expiry=placeholder,
     )
 
 
@@ -673,6 +700,8 @@ def market_snapshot_to_page_view(
         option_chain_columns=snap.option_chain_columns,
         option_chain_rows=snap.option_chain_rows,
         atm_strike=snap.atm_strike,
+        nearest_expiry=snap.nearest_expiry,
+        ai_selected_strikes=snap.ai_selected_strikes,
     )
 
 
@@ -1633,6 +1662,7 @@ def paper_ledger_to_page_view(
                 avg_price=row.entry,
                 mark=row.current,
                 pnl=row.mtm,
+                exposure=row.exposure,
             )
             for row in ledger.positions
         ),
@@ -2009,6 +2039,71 @@ def _compute_vwap_series(
     return tuple(series)
 
 
+def _resample_sequential(
+    candles: tuple[tuple[str, float, float, float, float, int], ...],
+    group_size: int,
+) -> tuple[tuple[str, float, float, float, float, int], ...]:
+    """Group every ``group_size`` consecutive real candles into one real bar.
+
+    Used for 2H/4H, which Kite has no native interval for. Groups
+    sequential real 60-minute bars (rather than wall-clock-aligned
+    buckets) since NSE's 09:15-15:30 session doesn't align to round hour
+    boundaries — every value in the output is still a real open/high/low/
+    close/volume drawn only from real input candles.
+    """
+    if group_size <= 1 or not candles:
+        return candles
+    output: list[tuple[str, float, float, float, float, int]] = []
+    for start in range(0, len(candles), group_size):
+        chunk = candles[start : start + group_size]
+        if not chunk:
+            continue
+        iso_time = chunk[0][0]
+        open_ = chunk[0][1]
+        high = max(item[2] for item in chunk)
+        low = min(item[3] for item in chunk)
+        close = chunk[-1][4]
+        volume = sum(item[5] for item in chunk)
+        output.append((iso_time, open_, high, low, close, volume))
+    return tuple(output)
+
+
+def _resample_calendar(
+    candles: tuple[tuple[str, float, float, float, float, int], ...],
+    bucket: str,
+) -> tuple[tuple[str, float, float, float, float, int], ...]:
+    """Group real daily candles by real ISO calendar week or month.
+
+    ``bucket`` is ``"week"`` or ``"month"``. Every output value is real
+    open/high/low/close/volume aggregated only from real input candles.
+    """
+    if not candles:
+        return ()
+    buckets: dict[object, list[tuple[str, float, float, float, float, int]]] = {}
+    order: list[object] = []
+    for candle in candles:
+        try:
+            stamp = datetime.fromisoformat(candle[0])
+        except ValueError:
+            continue
+        key = stamp.isocalendar()[:2] if bucket == "week" else (stamp.year, stamp.month)
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(candle)
+    output: list[tuple[str, float, float, float, float, int]] = []
+    for key in order:
+        chunk = buckets[key]
+        iso_time = chunk[0][0]
+        open_ = chunk[0][1]
+        high = max(item[2] for item in chunk)
+        low = min(item[3] for item in chunk)
+        close = chunk[-1][4]
+        volume = sum(item[5] for item in chunk)
+        output.append((iso_time, open_, high, low, close, volume))
+    return tuple(output)
+
+
 def _nearest_candle(
     candles: tuple[tuple[str, float, float, float, float, int], ...],
     at: datetime,
@@ -2096,6 +2191,33 @@ def _compute_max_pain_strike(rows: tuple[tuple[str, ...], ...]) -> float | None:
     return best_strike
 
 
+# Real logger-name prefix -> alert category. Every prefix is a real
+# ``logging.getLogger(...)`` name already used elsewhere in this codebase
+# (see broker/*, market_data/*, decision/*, execution/*, paper_trading/*,
+# system/*) — this only classifies which real subsystem emitted a real
+# log line, never invents an alert.
+_ALERT_CATEGORY_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("market_data.", "Market"),
+    ("broker.market_data_bridge", "Market"),
+    ("decision.", "AI"),
+    ("apme.", "AI"),
+    ("broker.", "Broker"),
+    ("execution.", "Execution"),
+    ("paper_trading.", "Execution"),
+    ("system.paper_trading_runtime", "Execution"),
+)
+
+
+def _classify_alert_category(logger_name: str) -> str:
+    """Real classification of a real log entry's logger name into a
+    Market / AI / Broker / Execution / System alert category."""
+    name = logger_name.strip()
+    for prefix, category in _ALERT_CATEGORY_PREFIXES:
+        if name.startswith(prefix):
+            return category
+    return "System"
+
+
 def _classify_liquidity(spread_pct: float) -> str:
     """Deterministic liquidity classification of a real spread percentage.
 
@@ -2157,29 +2279,65 @@ def _compute_liquidity_rows(
     return tuple(output)
 
 
-def _build_oi_buildup_rows(
-    rows: tuple[tuple[str, ...], ...], placeholder: str
-) -> tuple[tuple["OiBuildupRow", ...], tuple["OiBuildupRow", ...]]:
-    """Top-5 real CALL and PUT rows by real open interest, descending.
+def _compute_atm_iv(rows: tuple[tuple[str, ...], ...], atm_strike: str, placeholder: str) -> str:
+    """Real ATM IV — the average of the real CE and PE IV at the real ATM strike.
 
-    ``change`` is a real absolute OI delta (this poll minus the previous
-    poll for that instrument) — displayed as a signed count, never
-    mislabeled as a percentage the platform cannot compute from a single
-    baseline-less snapshot.
+    Averages only the real IV values actually present at that strike;
+    never estimated when one side is missing.
     """
+    if atm_strike in (placeholder, "", None):
+        return placeholder
+    columns = list(MarketPageView.option_chain_columns)
+    try:
+        strike_idx, iv_idx = columns.index("strike"), columns.index("iv")
+    except ValueError:
+        return placeholder
+    ivs: list[float] = []
+    for row in rows:
+        if len(row) <= max(strike_idx, iv_idx):
+            continue
+        if str(row[strike_idx]).strip() != str(atm_strike).strip():
+            continue
+        try:
+            ivs.append(float(row[iv_idx]))
+        except (ValueError, IndexError):
+            continue
+    if not ivs:
+        return placeholder
+    return f"{sum(ivs) / len(ivs):.2f}%"
+
+
+def _build_top_by_metric_rows(
+    rows: tuple[tuple[str, ...], ...], *, metric: str, placeholder: str
+) -> tuple[tuple["OiBuildupRow", ...], tuple["OiBuildupRow", ...]]:
+    """Top-5 real CALL and PUT rows by a real metric column, descending.
+
+    ``metric`` is ``"oi"`` or ``"volume"`` — same real-data treatment as
+    the OI build-up table, just ranked by a different real column.
+    """
+    columns = list(MarketPageView.option_chain_columns)
+    try:
+        idx = {
+            name: columns.index(name)
+            for name in ("strike", "type", "ltp", "oi", "oi_change", "volume")
+        }
+    except ValueError:
+        return (), ()
+    rank_key = idx[metric]
+
     calls: list[tuple[float, OiBuildupRow]] = []
     puts: list[tuple[float, OiBuildupRow]] = []
     for row in rows:
-        if len(row) < 7:
+        if len(row) <= max(idx.values()):
             continue
-        option_type = row[1].strip().upper()
+        option_type = row[idx["type"]].strip().upper()
         if option_type not in ("CE", "PE", "CALL", "PUT"):
             continue
         try:
-            oi = float(row[5])
+            rank_value = float(row[rank_key])
         except (ValueError, IndexError):
             continue
-        change_raw = row[6]
+        change_raw = row[idx["oi_change"]]
         trend = placeholder
         change_display = placeholder
         try:
@@ -2188,17 +2346,19 @@ def _build_oi_buildup_rows(
             trend = "up" if change_value > 0 else "down" if change_value < 0 else "flat"
         except (ValueError, TypeError):
             pass
+        try:
+            oi_display = f"{float(row[idx['oi']]):,.0f}"
+        except (ValueError, IndexError):
+            oi_display = row[idx["oi"]] if len(row) > idx["oi"] else placeholder
         item = OiBuildupRow(
-            strike=row[0],
-            open_interest=f"{oi:,.0f}",
+            strike=row[idx["strike"]],
+            open_interest=oi_display,
             change_percent=change_display,
-            ltp=row[2],
+            ltp=row[idx["ltp"]],
             trend=trend,
         )
-        if option_type in ("CE", "CALL"):
-            calls.append((oi, item))
-        else:
-            puts.append((oi, item))
+        target = calls if option_type in ("CE", "CALL") else puts
+        target.append((rank_value, item))
     calls.sort(key=lambda pair: pair[0], reverse=True)
     puts.sort(key=lambda pair: pair[0], reverse=True)
     return tuple(item for _, item in calls[:5]), tuple(item for _, item in puts[:5])
@@ -2332,36 +2492,26 @@ class DashboardIntegrationFacade:
         return self._cached_get("get_ai_panel", lambda: self._try_optional("get_ai_panel"))
 
     def get_market_chart(
-        self,
-        underlying: str,
-        *,
-        fast_span: int = 9,
-        slow_span: int = 21,
-        timeframe: str = "1D",
+        self, underlying: str, *, timeframe: str = _DEFAULT_CHART_TIMEFRAME
     ) -> MarketChartView:
-        """Return the real candlestick/EMA/VWAP chart series for ``underlying``.
+        """Return the real candlestick/EMA(9/20/50)/VWAP chart series for ``underlying``.
 
         Aggregates real OHLCV candles from the injected session's optional
         ``get_underlying_candles`` accessor when present; otherwise returns
-        offline placeholders. Never fetches broker data itself.
+        offline placeholders. Never fetches broker data itself. EMA spans
+        are fixed at 9/20/50 (the institutional-standard trio) — always
+        computed, so the UI can toggle their visibility without refetching.
 
         Args:
             underlying: Underlying symbol.
-            fast_span: Fast EMA span (default 9 for the Market page panel;
-                pass 20 for the Home overview's EMA 20/50 legend).
-            slow_span: Slow EMA span (default 21; pass 50 for Home).
-            timeframe: One of ``1D/5D/1M/3M/6M/1Y`` — maps to a real
-                broker interval + lookback span; unknown values fall back
-                to ``1D``.
+            timeframe: One of ``1m/3m/5m/10m/15m/30m/1H/2H/4H/Daily/Weekly/
+                Monthly`` — maps to a real broker interval + lookback span
+                (2H/4H/Weekly/Monthly are real OHLCV resamples of real base
+                candles); unknown values fall back to the default.
         """
-        cache_key = (
-            f"get_market_chart:{underlying.strip().upper()}:{fast_span}:{slow_span}:{timeframe}"
-        )
+        cache_key = f"get_market_chart:{underlying.strip().upper()}:{timeframe}"
         return self._cached_get(
-            cache_key,
-            lambda: self._fetch_market_chart(
-                underlying, fast_span=fast_span, slow_span=slow_span, timeframe=timeframe
-            ),
+            cache_key, lambda: self._fetch_market_chart(underlying, timeframe=timeframe)
         )
 
     def get_dashboard_overview(self, underlying: str = "NIFTY") -> DashboardOverviewView:
@@ -2823,23 +2973,47 @@ class DashboardIntegrationFacade:
             ) or MarketPageView.option_chain_columns,
             option_chain_rows=_tuple_rows(_attr(snap, "option_chain_rows")),
             atm_strike=_display_str(_attr(snap, "atm_strike"), ph),
+            nearest_expiry=_display_str(_attr(snap, "nearest_expiry"), ph),
+            ai_selected_strikes=self._compute_ai_selected_strikes(),
         )
 
+    def _compute_ai_selected_strikes(self) -> tuple[str, ...]:
+        """Return the real strike prices from the top-ranked strategy's own legs.
+
+        Soft-reads the same upstream data the Strategy Scanner's
+        ``get_strategy_status()`` already uses — never evaluates a strategy
+        or picks a strike itself, only relays strikes the strategy engine
+        already selected. Calls the uncached builder directly (not the
+        public ``get_strategy_status()`` accessor) so this internal read
+        never marks the shared strategy-status cache entry as already
+        consumed for the engine-health "live vs cached" freshness check.
+        """
+        try:
+            status = self._fetch_strategy_status()
+        except Exception:  # noqa: BLE001 - optional soft-read
+            return ()
+        strikes: list[str] = []
+        for row in status.strategies:
+            if row.rank != "1":
+                continue
+            for leg in row.legs:
+                if leg.strike and leg.strike != self._config.placeholder:
+                    strikes.append(leg.strike)
+            break
+        return tuple(dict.fromkeys(strikes))
+
     def _fetch_market_chart(
-        self,
-        underlying: str,
-        *,
-        fast_span: int = 9,
-        slow_span: int = 21,
-        timeframe: str = "1D",
+        self, underlying: str, *, timeframe: str = _DEFAULT_CHART_TIMEFRAME
     ) -> MarketChartView:
-        """Build the real candlestick/EMA/VWAP chart series for ``underlying``."""
+        """Build the real candlestick/EMA(9/20/50)/VWAP chart series for ``underlying``."""
         if self._session is None or not hasattr(self._session, "get_underlying_candles"):
             return MarketChartView(underlying=underlying, source="offline")
-        interval, lookback = _TIMEFRAME_PRESETS.get(timeframe, _TIMEFRAME_PRESETS["1D"])
+        base_interval, lookback, resample = _TIMEFRAME_PRESETS.get(
+            timeframe, _TIMEFRAME_PRESETS[_DEFAULT_CHART_TIMEFRAME]
+        )
         try:
             raw = self._session.get_underlying_candles(
-                underlying, interval=interval, lookback=lookback
+                underlying, interval=base_interval, lookback=lookback
             )
         except TypeError:
             # Simpler duck-typed sessions (e.g. test stubs) may only accept
@@ -2857,18 +3031,24 @@ class DashboardIntegrationFacade:
             return MarketChartView(underlying=underlying, source="offline")
 
         candles = _normalize_candle_rows(_attr(raw, "candles"))
-        interval = _display_str(_attr(raw, "interval"), self._config.placeholder)
+        reported_interval = _display_str(_attr(raw, "interval"), self._config.placeholder)
+        if isinstance(resample, int):
+            candles = _resample_sequential(candles, resample)
+        elif resample in ("week", "month"):
+            candles = _resample_calendar(candles, resample)
         if not candles:
-            return MarketChartView(underlying=underlying, interval=interval, source="live")
+            return MarketChartView(underlying=underlying, interval=timeframe, source="live")
 
         return MarketChartView(
             underlying=underlying,
-            interval=interval,
+            interval=timeframe if resample else reported_interval,
             candles=candles,
-            ema_fast=_compute_ema_series(candles, span=fast_span),
-            ema_slow=_compute_ema_series(candles, span=slow_span),
+            ema9=_compute_ema_series(candles, span=9),
+            ema20=_compute_ema_series(candles, span=20),
+            ema50=_compute_ema_series(candles, span=50),
             vwap=_compute_vwap_series(candles),
             markers=self._build_chart_markers(underlying, candles),
+            price_lines=self._build_chart_price_lines(underlying),
             source="live",
         )
 
@@ -2879,11 +3059,12 @@ class DashboardIntegrationFacade:
     ) -> tuple[ChartMarkerView, ...]:
         """Build real, timestamped markers only where real backend data exists.
 
-        Currently supports AI signal markers (a real ``trade_candidate``
-        decision cycle anchored to the underlying's own real close at the
-        nearest real candle timestamp). Entry/exit/SL/target markers are
-        intentionally omitted until the backend exposes real per-instrument
-        fill/target data — never fabricated.
+        Supports an AI signal marker (a real ``trade_candidate`` decision
+        cycle anchored to the underlying's own real close at the nearest
+        real candle timestamp) and a real entry marker at the decision's own
+        ``spot_at_signal`` when the sealed trade decision exposes one. Exit
+        markers are intentionally omitted until the backend exposes a real
+        per-instrument fill/close event — never fabricated.
         """
         panel = self.get_ai_panel()
         if panel is None:
@@ -2901,7 +3082,7 @@ class DashboardIntegrationFacade:
             return ()
         iso_time, close_price = nearest
         strategy_id = _display_str(_attr(panel, "strategy_id"), self._config.placeholder)
-        return (
+        markers = [
             ChartMarkerView(
                 time=iso_time,
                 price=close_price,
@@ -2909,7 +3090,45 @@ class DashboardIntegrationFacade:
                 kind="ai_signal",
                 position="above",
             ),
-        )
+        ]
+        entry_price = _attr(panel, "entry_price")
+        if isinstance(entry_price, (int, float)):
+            action = _display_str(_attr(panel, "signal_action"), "").lower()
+            markers.append(
+                ChartMarkerView(
+                    time=iso_time,
+                    price=float(entry_price),
+                    label="Entry",
+                    kind="entry",
+                    position="below" if action == "bullish" else "above",
+                )
+            )
+        return tuple(markers)
+
+    def _build_chart_price_lines(self, underlying: str) -> tuple[ChartPriceLineView, ...]:
+        """Build real SL/Target horizontal price lines for the active signal.
+
+        Only emitted when the AI panel's active signal carries an absolute
+        ``UNDERLYING_LEVEL`` stop-loss/target hint (already resolved to a
+        real float by the session adapter) — never converted or estimated
+        from a premium-based hint here or upstream.
+        """
+        panel = self.get_ai_panel()
+        if panel is None or not _attr(panel, "signal_active"):
+            return ()
+        panel_underlying = _display_str(_attr(panel, "underlying"), "")
+        if panel_underlying and panel_underlying.strip().upper() != underlying.strip().upper():
+            return ()
+        lines: list[ChartPriceLineView] = []
+        sl_level = _attr(panel, "stop_loss_level")
+        if isinstance(sl_level, (int, float)):
+            lines.append(ChartPriceLineView(price=float(sl_level), label="SL", kind="sl"))
+        target_level = _attr(panel, "target_level")
+        if isinstance(target_level, (int, float)):
+            lines.append(
+                ChartPriceLineView(price=float(target_level), label="Target", kind="target")
+            )
+        return tuple(lines)
 
     def _fetch_liquidity_rows(self) -> tuple[tuple[str, ...], ...]:
         """Build the real liquidity table from the current market snapshot."""
@@ -2943,8 +3162,7 @@ class DashboardIntegrationFacade:
         ledger_latency_ms = (time.perf_counter() - started) * 1000.0
 
         indices = self.get_home_market_indices()
-        logs = self.get_logs(limit=8)
-        chart = self.get_market_chart(underlying, fast_span=20, slow_span=50)
+        logs = self.get_logs(limit=40)
 
         regime_raw = strategy.market_regime
         regime_card = MetricCardView(
@@ -3033,17 +3251,24 @@ class DashboardIntegrationFacade:
             ai_latency_ms=ai_latency_ms,
             ledger_latency_ms=ledger_latency_ms,
         )
-        running_count = sum(1 for row in engines if row.running)
+        healthy_count = sum(1 for row in engines if row.state == "healthy")
+        down_count = sum(1 for row in engines if row.state == "down")
         if not engines:
             overall_health = ph
-        elif running_count == len(engines):
+        elif healthy_count == len(engines):
             overall_health = "EXCELLENT"
-        elif running_count >= len(engines) / 2:
-            overall_health = "DEGRADED"
-        else:
+        elif down_count >= len(engines) / 2:
             overall_health = "CRITICAL"
+        else:
+            overall_health = "DEGRADED"
 
-        oi_calls, oi_puts = _build_oi_buildup_rows(market.option_chain_rows, ph)
+        oi_calls, oi_puts = _build_top_by_metric_rows(
+            market.option_chain_rows, metric="oi", placeholder=ph
+        )
+        volume_calls, volume_puts = _build_top_by_metric_rows(
+            market.option_chain_rows, metric="volume", placeholder=ph
+        )
+        atm_iv = _compute_atm_iv(market.option_chain_rows, market.atm_strike, ph)
 
         scanner_rows = tuple(
             ScannerRow(
@@ -3051,6 +3276,13 @@ class DashboardIntegrationFacade:
                 score=row.score,
                 signal=row.recommendation_state,
                 confidence=row.confidence,
+                expected_pop=row.expected_pop,
+                # No expected-ROI or expected-theta field exists anywhere in
+                # the strategy evaluation engine's real output — left as an
+                # honest placeholder rather than fabricated.
+                expected_roi=ph,
+                expected_theta=ph,
+                status=row.status,
             )
             for row in strategy.strategies
         )
@@ -3061,8 +3293,9 @@ class DashboardIntegrationFacade:
                 detail=entry.logger,
                 timestamp=entry.timestamp,
                 severity=entry.level.lower(),
+                category=_classify_alert_category(entry.logger),
             )
-            for entry in logs.entries[:6]
+            for entry in logs.entries[:30]
         )
 
         return DashboardOverviewView(
@@ -3075,12 +3308,16 @@ class DashboardIntegrationFacade:
             put_call_ratio=pcr_card,
             max_pain=max_pain_card,
             fii_dii=fii_dii_card,
-            chart=chart,
             breadth_available=False,
             engines=engines,
             engines_overall_health=overall_health,
             oi_buildup_calls=oi_calls,
             oi_buildup_puts=oi_puts,
+            volume_buildup_calls=volume_calls,
+            volume_buildup_puts=volume_puts,
+            atm_strike=market.atm_strike,
+            atm_iv=atm_iv,
+            nearest_expiry=market.nearest_expiry,
             scanner_rows=scanner_rows,
             alerts=alerts,
             broker_connected=system.broker_status == "CONNECTED",
@@ -3105,36 +3342,83 @@ class DashboardIntegrationFacade:
         """Build Engine Status rows from real component health and real
         measured response times of the actual dashboard read calls above.
 
-        Rows without a standalone long-running component (Risk, Position
-        Sizing, Greeks/OI) are derived from whether the latest real
-        decision/snapshot data they depend on is actually present this
-        cycle — never a fabricated running/latency value.
+        Each row gets a real 3-tier state:
+          - "down": the backing component/session isn't registered at all.
+          - "degraded": registered, but this cycle's real data for that
+            domain is empty/placeholder (e.g. connected but no decision
+            has run yet).
+          - "healthy": registered and producing real, fresh data this cycle.
+        Never a fabricated tier — every input is a real signal already
+        read above. Heartbeat is the real clock time of this read.
         """
         ph = self._config.placeholder
+        registered = self._session is not None
+        now_display = self._clock().strftime("%H:%M:%S")
 
         def _fmt(ms: float) -> str:
             return f"{ms:.0f}ms"
 
-        ai_running = panel is not None and _attr(panel, "decision_status", ph) != ph
-        risk_running = panel is not None and _attr(panel, "risk_verdict", ph) != ph
-        sizing_running = panel is not None and bool(_attr(panel, "reasons", ()))
-        greeks_running = any(
+        def _row(name: str, *, is_registered: bool, data_present: bool, latency_ms: float) -> EngineStatusRow:
+            if not is_registered:
+                return EngineStatusRow(name, state="down", latency_display=ph, heartbeat=ph)
+            state = "healthy" if data_present else "degraded"
+            return EngineStatusRow(
+                name, state=state, latency_display=_fmt(latency_ms), heartbeat=now_display
+            )
+
+        ai_registered = panel is not None
+        ai_data = ai_registered and _attr(panel, "decision_status", ph) != ph
+        risk_data = ai_registered and _attr(panel, "risk_verdict", ph) != ph
+        sizing_data = ai_registered and bool(_attr(panel, "reasons", ()))
+        greeks_data = any(
             len(row) > 9 and row[9] not in (ph, "", None) for row in market.option_chain_rows
         )
+        strategy_data = strategy.source == "live" and bool(strategy.strategies) and any(
+            row.status != ph for row in strategy.strategies
+        )
+        ledger_data = ledger.source == "live" and ledger.available_cash != ph
 
         return (
-            EngineStatusRow("Market Data Engine", market.source == "live", _fmt(market_latency_ms)),
-            EngineStatusRow(
-                "Broker Connection", system.broker_status == "CONNECTED", _fmt(system_latency_ms)
+            _row(
+                "Market Data Engine",
+                is_registered=registered,
+                data_present=market.source == "live" and bool(market.option_chain_rows),
+                latency_ms=market_latency_ms,
             ),
-            EngineStatusRow("AI Decision Engine", ai_running, _fmt(ai_latency_ms)),
-            EngineStatusRow("Risk Engine", risk_running, _fmt(ai_latency_ms)),
-            EngineStatusRow("Position Sizing Engine", sizing_running, _fmt(ai_latency_ms)),
-            EngineStatusRow(
-                "Strategy Intelligence Engine", strategy.source == "live", _fmt(strategy_latency_ms)
+            _row(
+                "Broker Connection",
+                is_registered=registered,
+                data_present=system.broker_status == "CONNECTED",
+                latency_ms=system_latency_ms,
             ),
-            EngineStatusRow("Greeks & OI Pipeline", greeks_running, _fmt(market_latency_ms)),
-            EngineStatusRow("Paper Trading Engine", ledger.source == "live", _fmt(ledger_latency_ms)),
+            _row(
+                "AI Decision Engine",
+                is_registered=ai_registered,
+                data_present=ai_data,
+                latency_ms=ai_latency_ms,
+            ),
+            _row(
+                "Risk Engine", is_registered=ai_registered, data_present=risk_data,
+                latency_ms=ai_latency_ms,
+            ),
+            _row(
+                "Position Sizing Engine", is_registered=ai_registered, data_present=sizing_data,
+                latency_ms=ai_latency_ms,
+            ),
+            _row(
+                "Strategy Intelligence Engine",
+                is_registered=registered,
+                data_present=strategy_data,
+                latency_ms=strategy_latency_ms,
+            ),
+            _row(
+                "Greeks & OI Pipeline", is_registered=registered, data_present=greeks_data,
+                latency_ms=market_latency_ms,
+            ),
+            _row(
+                "Paper Trading Engine", is_registered=registered, data_present=ledger_data,
+                latency_ms=ledger_latency_ms,
+            ),
         )
 
     def _fetch_strategy_status(self) -> FacadeStrategyStatus:
@@ -3275,6 +3559,7 @@ class DashboardIntegrationFacade:
                         reason=reason,
                         placeholder=ph,
                     ),
+                    expected_pop=_format_confidence(_field(item, "expected_pop"), ph),
                     gates=_extract_gates(item, ph),
                     legs=_extract_legs(item, ph),
                 )
@@ -3434,6 +3719,15 @@ class DashboardIntegrationFacade:
             _field(item, "strategy", "strategy_id"),
             ph,
         )
+        # Real exposure = quantity * mark price — pure arithmetic on the
+        # position's own already-real fields, never a fabricated estimate.
+        raw_qty = _parse_float(_field(item, "quantity", "qty"))
+        raw_mark = _parse_float(_field(item, "current", "mark", "mark_price"))
+        exposure = (
+            _format_money(abs(raw_qty * raw_mark), ph)
+            if raw_qty is not None and raw_mark is not None
+            else ph
+        )
         return FacadePaperLedgerPosition(
             symbol=symbol,
             strategy=strategy,
@@ -3442,6 +3736,7 @@ class DashboardIntegrationFacade:
             current=current,
             mtm=mtm,
             status=status,
+            exposure=exposure,
         )
 
     def _map_ledger_orders(
@@ -4130,17 +4425,10 @@ class PresentationFacadeAdapter:
         return self._facade.get_ai_panel()
 
     def get_market_chart(
-        self,
-        underlying: str,
-        *,
-        fast_span: int = 9,
-        slow_span: int = 21,
-        timeframe: str = "1D",
+        self, underlying: str, *, timeframe: str = _DEFAULT_CHART_TIMEFRAME
     ) -> MarketChartView:
-        """Expose the real candlestick/EMA/VWAP chart series through the adapter."""
-        return self._facade.get_market_chart(
-            underlying, fast_span=fast_span, slow_span=slow_span, timeframe=timeframe
-        )
+        """Expose the real candlestick/EMA(9/20/50)/VWAP chart series through the adapter."""
+        return self._facade.get_market_chart(underlying, timeframe=timeframe)
 
     def get_dashboard_overview(self, underlying: str = "NIFTY") -> DashboardOverviewView:
         """Expose the composed Home / Dashboard Overview snapshot through the adapter."""

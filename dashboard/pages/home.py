@@ -14,7 +14,7 @@ from dashboard.components.overview_widgets import (
     render_footer_bar,
     render_market_breadth_placeholder,
     render_metric_cards,
-    render_oi_buildup,
+    render_option_summary,
     render_strategy_scanner,
 )
 from dashboard.components.page_header import render_page_header
@@ -31,8 +31,13 @@ from dashboard.view_models import (
 
 _logger = logging.getLogger("dashboard.pages.home")
 
-_CHART_UNDERLYINGS: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "SENSEX")
-_TIMEFRAMES: tuple[str, ...] = ("1D", "5D", "1M", "3M", "6M", "1Y")
+_CHART_UNDERLYINGS: tuple[str, ...] = (
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX",
+)
+_TIMEFRAMES: tuple[str, ...] = (
+    "1m", "3m", "5m", "10m", "15m", "30m", "1H", "2H", "4H", "Daily", "Weekly", "Monthly",
+)
+_DEFAULT_TIMEFRAME = "5m"
 
 
 def _payload_to_views(payload: object) -> tuple[IndexQuoteView, ...] | None:
@@ -133,12 +138,12 @@ def _resolve_overview(ctx: DashboardRenderContext, underlying: str) -> Dashboard
 def _resolve_trend_chart(
     ctx: DashboardRenderContext, underlying: str, timeframe: str
 ) -> MarketChartView:
-    """Load the real candlestick/EMA(20)/EMA(50) series for the trend panel."""
+    """Load the real candlestick/EMA(9/20/50)/VWAP series for the trend panel."""
     getter = getattr(ctx.facade, "get_market_chart", None)
     if not callable(getter):
         return MarketChartView(underlying=underlying, source="offline")
     try:
-        chart = getter(underlying, fast_span=20, slow_span=50, timeframe=timeframe)
+        chart = getter(underlying, timeframe=timeframe)
         if isinstance(chart, MarketChartView):
             return chart
     except Exception as exc:  # noqa: BLE001 - Home must not crash
@@ -147,7 +152,7 @@ def _resolve_trend_chart(
 
 
 def _render_trend_panel(ctx: DashboardRenderContext, underlying: str) -> None:
-    """Render the Market Trend panel with real timeframe tabs."""
+    """Render the Market Trend panel with real interval selection."""
     st.markdown(
         f"<div class='theta-panel-title'>Market Trend ({underlying})</div>",
         unsafe_allow_html=True,
@@ -155,15 +160,15 @@ def _render_trend_panel(ctx: DashboardRenderContext, underlying: str) -> None:
     timeframe = st.segmented_control(
         "Timeframe",
         options=_TIMEFRAMES,
-        default="1D",
+        default=_DEFAULT_TIMEFRAME,
         key="home_chart_timeframe",
         label_visibility="collapsed",
-    ) or "1D"
+    ) or _DEFAULT_TIMEFRAME
     chart = _resolve_trend_chart(ctx, underlying, timeframe)
     if chart.candles:
         _t, o, h, l, c, _v = chart.candles[-1]
         st.caption(f"O {o:,.2f}  H {h:,.2f}  L {l:,.2f}  C {c:,.2f}")
-    render_lightweight_chart(chart, height=420)
+    render_lightweight_chart(chart, height=420, key_prefix="theta_home_chart")
 
 
 def _render_metrics_row(ctx: DashboardRenderContext) -> None:
@@ -180,14 +185,21 @@ def _render_metrics_row(ctx: DashboardRenderContext) -> None:
     )
 
 
-def _render_trend_breadth_engine_row(ctx: DashboardRenderContext) -> None:
-    """Render the chart/breadth/engine row (re-invoked independently on refresh)."""
-    underlying = _selected_underlying()
-    overview = _resolve_overview(ctx, underlying)
+def _render_chart_row(ctx: DashboardRenderContext) -> None:
+    """Render just the Market Trend chart panel (independent live refresh).
 
-    col_chart, col_breadth, col_engine = st.columns([2, 1, 1])
-    with col_chart, st.container(border=True, key="theta_panel_trend"):
+    Split out from breadth/engine so a live candle tick never forces a
+    redraw of the panels beside it, and vice versa.
+    """
+    underlying = _selected_underlying()
+    with st.container(border=True, key="theta_panel_trend"):
         _render_trend_panel(ctx, underlying)
+
+
+def _render_breadth_engine_row(ctx: DashboardRenderContext) -> None:
+    """Render the breadth + engine-status panels (independent live refresh)."""
+    overview = _resolve_overview(ctx, _selected_underlying())
+    col_breadth, col_engine = st.columns(2)
     with col_breadth, st.container(border=True, key="theta_panel_breadth"):
         if overview.breadth_available:
             st.metric("Advancing", overview.breadth_advancing)
@@ -205,7 +217,17 @@ def _render_summary_row(ctx: DashboardRenderContext) -> None:
 
     col_oi, col_scanner, col_alerts = st.columns(3)
     with col_oi, st.container(border=True, key="theta_panel_oi"):
-        render_oi_buildup(overview.oi_buildup_calls, overview.oi_buildup_puts)
+        render_option_summary(
+            atm_strike=overview.atm_strike,
+            atm_iv=overview.atm_iv,
+            pcr=overview.put_call_ratio.value,
+            max_pain=overview.max_pain.value,
+            nearest_expiry=overview.nearest_expiry,
+            oi_calls=overview.oi_buildup_calls,
+            oi_puts=overview.oi_buildup_puts,
+            volume_calls=overview.volume_buildup_calls,
+            volume_puts=overview.volume_buildup_puts,
+        )
     with col_scanner, st.container(border=True, key="theta_panel_scanner"):
         render_strategy_scanner(overview.scanner_rows)
     with col_alerts, st.container(border=True, key="theta_panel_alerts"):
@@ -235,7 +257,11 @@ def render(ctx: DashboardRenderContext) -> None:
 
     if not ctx.config.enable_autorefresh:
         _render_metrics_row(ctx)
-        _render_trend_breadth_engine_row(ctx)
+        col_chart, col_side = st.columns([2, 2])
+        with col_chart:
+            _render_chart_row(ctx)
+        with col_side:
+            _render_breadth_engine_row(ctx)
         _render_summary_row(ctx)
         return
 
@@ -244,11 +270,23 @@ def render(ctx: DashboardRenderContext) -> None:
         interval_seconds=ctx.config.refresh_interval_seconds,
         key="dashboard_metrics_refresh",
     )
-    live_fragment(
-        lambda: _render_trend_breadth_engine_row(ctx),
-        interval_seconds=ctx.config.refresh_interval_seconds,
-        key="dashboard_trend_refresh",
-    )
+
+    col_chart, col_side = st.columns([2, 2])
+    with col_chart:
+        # Faster, independent cadence — live candle ticks never wait on or
+        # force a redraw of the breadth/engine-status panel beside it.
+        live_fragment(
+            lambda: _render_chart_row(ctx),
+            interval_seconds=min(ctx.config.refresh_interval_seconds, 3.0),
+            key="dashboard_chart_refresh",
+        )
+    with col_side:
+        live_fragment(
+            lambda: _render_breadth_engine_row(ctx),
+            interval_seconds=ctx.config.refresh_interval_seconds,
+            key="dashboard_breadth_engine_refresh",
+        )
+
     live_fragment(
         lambda: _render_summary_row(ctx),
         interval_seconds=ctx.config.refresh_interval_seconds,

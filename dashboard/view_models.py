@@ -129,6 +129,8 @@ class MarketPageView:
     )
     option_chain_rows: tuple[tuple[str, ...], ...] = ()
     atm_strike: str = PLACEHOLDER
+    nearest_expiry: str = PLACEHOLDER
+    ai_selected_strikes: tuple[str, ...] = ()
 
 
 def market_page_statistic_cards(view: MarketPageView) -> tuple[KpiCardModel, ...]:
@@ -182,6 +184,25 @@ class ChartMarkerView:
 
 
 @dataclass(frozen=True)
+class ChartPriceLineView:
+    """Single real horizontal price-line overlay (stop-loss / target).
+
+    Only emitted when the backing signal hint is an absolute
+    ``UNDERLYING_LEVEL`` value directly plottable on the underlying's own
+    price axis — never derived or estimated from a premium-based hint.
+
+    Attributes:
+        price: Real absolute underlying price level.
+        label: Short display text (e.g. ``"SL"`` / ``"Target"``).
+        kind: ``sl`` or ``target``.
+    """
+
+    price: float
+    label: str
+    kind: str
+
+
+@dataclass(frozen=True)
 class MarketChartView:
     """Real OHLCV chart series for the Market page candlestick panel.
 
@@ -192,10 +213,11 @@ class MarketChartView:
 
     Attributes:
         underlying: Underlying symbol this series belongs to.
-        interval: Candle granularity (e.g. ``5minute``).
+        interval: Real candle granularity actually returned (e.g. ``5minute``).
         candles: Real OHLCV rows as ``(iso_time, open, high, low, close, volume)``.
-        ema_fast: Fast EMA overlay as ``(iso_time, value)`` pairs.
-        ema_slow: Slow EMA overlay as ``(iso_time, value)`` pairs.
+        ema9: EMA(9) overlay as ``(iso_time, value)`` pairs.
+        ema20: EMA(20) overlay as ``(iso_time, value)`` pairs.
+        ema50: EMA(50) overlay as ``(iso_time, value)`` pairs.
         vwap: Session VWAP overlay as ``(iso_time, value)`` pairs.
         markers: Real, timestamped chart annotations.
         source: Payload source (``live`` / ``offline`` / ``cached``).
@@ -204,10 +226,12 @@ class MarketChartView:
     underlying: str = PLACEHOLDER
     interval: str = PLACEHOLDER
     candles: tuple[tuple[str, float, float, float, float, int], ...] = ()
-    ema_fast: tuple[tuple[str, float], ...] = ()
-    ema_slow: tuple[tuple[str, float], ...] = ()
+    ema9: tuple[tuple[str, float], ...] = ()
+    ema20: tuple[tuple[str, float], ...] = ()
+    ema50: tuple[tuple[str, float], ...] = ()
     vwap: tuple[tuple[str, float], ...] = ()
     markers: tuple[ChartMarkerView, ...] = ()
+    price_lines: tuple[ChartPriceLineView, ...] = ()
     source: str = "offline"
 
 
@@ -240,15 +264,27 @@ class EngineStatusRow:
 
     Attributes:
         name: Component/pipeline-stage display name.
-        running: Real observed running/healthy state.
+        state: Real 3-tier health classification — ``"healthy"``
+            (registered and producing real fresh data this cycle),
+            ``"degraded"`` (registered/connected but this cycle's data is
+            placeholder/stale/empty), or ``"down"`` (not registered / no
+            session). Never a fabricated tier.
         latency_display: Real measured latency for this domain's dashboard
             read (round-trip of the actual backend accessor call) —
             ``PLACEHOLDER`` when the component is not registered.
+        heartbeat: Real timestamp of this health read (the same clock used
+            for the rest of this render), ``PLACEHOLDER`` when down.
     """
 
     name: str
-    running: bool = False
+    state: str = "down"
     latency_display: str = PLACEHOLDER
+    heartbeat: str = PLACEHOLDER
+
+    @property
+    def running(self) -> bool:
+        """Backward-compatible boolean view: healthy or degraded counts as up."""
+        return self.state in ("healthy", "degraded")
 
 
 @dataclass(frozen=True)
@@ -264,22 +300,39 @@ class OiBuildupRow:
 
 @dataclass(frozen=True)
 class ScannerRow:
-    """One row in the Strategy Scanner table."""
+    """One row in the Strategy Scanner table.
+
+    ``expected_pop`` is real (relayed from the strategy evaluation
+    engine's own ``expected_pop`` when present). ``expected_roi`` and
+    ``expected_theta`` have no corresponding field anywhere in the
+    backend evaluation output — they stay ``PLACEHOLDER`` rather than
+    being fabricated.
+    """
 
     strategy: str = PLACEHOLDER
     score: str = PLACEHOLDER
     signal: str = PLACEHOLDER
     confidence: str = PLACEHOLDER
+    expected_pop: str = PLACEHOLDER
+    expected_roi: str = PLACEHOLDER
+    expected_theta: str = PLACEHOLDER
+    status: str = PLACEHOLDER
 
 
 @dataclass(frozen=True)
 class AlertRow:
-    """One row in the Recent Alerts feed — sourced from real structured logs."""
+    """One row in the Recent Alerts feed — sourced from real structured logs.
+
+    ``category`` is a real classification of the log entry's own real
+    logger name (Market / AI / Broker / Execution / System) — never a
+    fabricated tag.
+    """
 
     title: str = PLACEHOLDER
     detail: str = PLACEHOLDER
     timestamp: str = PLACEHOLDER
     severity: str = "info"
+    category: str = "System"
 
 
 @dataclass(frozen=True)
@@ -305,7 +358,6 @@ class DashboardOverviewView:
     fii_dii: MetricCardView = field(
         default_factory=lambda: MetricCardView("FII / DII (Net)", available=False)
     )
-    chart: "MarketChartView" = field(default_factory=lambda: MarketChartView())
     breadth_available: bool = False
     breadth_advancing: int = 0
     breadth_declining: int = 0
@@ -314,6 +366,11 @@ class DashboardOverviewView:
     engines_overall_health: str = PLACEHOLDER
     oi_buildup_calls: tuple[OiBuildupRow, ...] = ()
     oi_buildup_puts: tuple[OiBuildupRow, ...] = ()
+    volume_buildup_calls: tuple[OiBuildupRow, ...] = ()
+    volume_buildup_puts: tuple[OiBuildupRow, ...] = ()
+    atm_strike: str = PLACEHOLDER
+    atm_iv: str = PLACEHOLDER
+    nearest_expiry: str = PLACEHOLDER
     scanner_rows: tuple[ScannerRow, ...] = ()
     alerts: tuple[AlertRow, ...] = ()
     broker_connected: bool = False
@@ -457,6 +514,11 @@ class PaperPositionView:
     current: str = PLACEHOLDER
     mtm: str = PLACEHOLDER
     status: str = PLACEHOLDER
+    exposure: str = PLACEHOLDER
+    delta: str = PLACEHOLDER
+    gamma: str = PLACEHOLDER
+    theta: str = PLACEHOLDER
+    vega: str = PLACEHOLDER
 
 
 @dataclass(frozen=True)

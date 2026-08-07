@@ -21,8 +21,8 @@ from dashboard.view_models import DashboardRenderContext, IndexQuoteView, PLACEH
 
 _TICKER_SYMBOLS: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "INDIA VIX")
 
-_STATUS_ON = {"CONNECTED", "LIVE", "AUTHENTICATED", "ACTIVE", "RUNNING"}
-_STATUS_OFF = {"DISCONNECTED", "OFFLINE", "ERROR", "FAILED", "STOPPED", "IDLE"}
+_STATUS_ON = {"CONNECTED", "LIVE", "AUTHENTICATED", "ACTIVE", "RUNNING", "OPEN"}
+_STATUS_OFF = {"DISCONNECTED", "OFFLINE", "ERROR", "FAILED", "STOPPED", "IDLE", "CLOSED"}
 
 
 def _signed_class(value: str) -> str:
@@ -88,6 +88,7 @@ def render_topbar(
     ctx: DashboardRenderContext,
     *,
     indices: tuple[IndexQuoteView, ...],
+    market_status: str,
     broker_status: str,
     websocket_status: str,
     alert_count: int,
@@ -97,6 +98,7 @@ def render_topbar(
     Args:
         ctx: Render context (used for navigation actions and the AI panel).
         indices: Real index quotes; only the three ticker symbols are shown.
+        market_status: Real market session status string (OPEN/CLOSED/...).
         broker_status: Real broker connectivity status string.
         websocket_status: Real WebSocket connectivity status string.
         alert_count: Real count of real WARN+/ERROR+ log entries.
@@ -114,7 +116,7 @@ def render_topbar(
         operator = "operator"
     initials = "".join(part[0] for part in operator.replace(".", " ").split()[:2]).upper() or "OP"
 
-    left, right = st.columns([3, 2.6])
+    left, right = st.columns([2.2, 3.4])
     with left:
         st.markdown(
             (
@@ -130,12 +132,13 @@ def render_topbar(
         )
     with right:
         status_col, clock_col, bell_col, gear_col, profile_col = st.columns(
-            [3.2, 1.5, 0.55, 0.55, 0.6]
+            [4.6, 1.3, 0.5, 0.5, 0.55]
         )
         with status_col:
             st.markdown(
                 (
                     "<div class='theta-status-chip-row'>"
+                    + _status_chip("Mkt", market_status)
                     + _status_chip("Broker", broker_status)
                     + _status_chip("WS", websocket_status)
                     + _status_chip("AI", ai_status)

@@ -45,6 +45,9 @@ _UNDERLYING_QUOTE_KEYS: Mapping[str, str] = {
     "NIFTY": "NSE:NIFTY 50",
     "BANKNIFTY": "NSE:BANKNIFTY",
     "FINNIFTY": "NSE:FINNIFTY",
+    # Same real NSE trading symbol -> underlying mapping already used by
+    # broker/instrument_loader.py ("NIFTY MID SELECT": "MIDCPNIFTY").
+    "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
     "SENSEX": "BSE:SENSEX",
 }
 _CANDLE_INTERVAL = "5minute"
@@ -64,6 +67,26 @@ def _attr(obj: object | None, name: str, default: object = None) -> object:
     if obj is None:
         return default
     return getattr(obj, name, default)
+
+
+def _hint_underlying_level(hint: object | None) -> float | None:
+    """Return a stop-loss/target hint's real absolute underlying level.
+
+    Only ``UNDERLYING_LEVEL``-typed hints carry a value directly plottable
+    on the underlying index chart (an absolute index point level). Other
+    hint types (premium multiple, percent-of-capital, structure breach,
+    time stop) describe the option structure's own premium/capital, not a
+    point on the underlying's price axis — plotting those would misrepresent
+    the value, so they are intentionally omitted rather than converted.
+    """
+    if hint is None:
+        return None
+    hint_type = getattr(hint, "hint_type", None)
+    hint_type_value = str(getattr(hint_type, "value", hint_type or "")).strip().lower()
+    if hint_type_value != "underlying_level":
+        return None
+    value = getattr(hint, "value", None)
+    return float(value) if isinstance(value, (int, float)) else None
 
 
 def _field(obj: object | None, *names: str, default: object = None) -> object:
@@ -337,6 +360,7 @@ class DashboardLiveSessionAdapter:
             option_chain = _attr(snapshot, "option_chain")
             metadata = _attr(option_chain, "metadata")
             atm_strike = _attr(metadata, "atm_strike")
+            expiry = _attr(metadata, "expiry")
             return SimpleNamespace(
                 underlyings=list(INDEX_UNDERLYINGS),
                 selected_underlying=_display(_attr(underlying, "symbol"), selected),
@@ -347,6 +371,7 @@ class DashboardLiveSessionAdapter:
                 option_chain_columns=_OPTION_CHAIN_COLUMNS,
                 option_chain_rows=self._option_chain_rows(option_chain),
                 atm_strike=_display(atm_strike, PLACEHOLDER),
+                nearest_expiry=_display(expiry, PLACEHOLDER),
             )
 
     def _option_chain_rows(self, option_chain: object | None) -> tuple[tuple[str, ...], ...]:
@@ -438,6 +463,18 @@ class DashboardLiveSessionAdapter:
             status_value = str(getattr(raw_status, "value", raw_status or "")).strip().lower()
             decision_as_of = _attr(decision, "as_of")
 
+            # Real per-signal entry/SL/target levels from the same sealed
+            # trade decision — relayed only, never fabricated or derived
+            # from a hint type this adapter cannot honestly convert.
+            trade_decision = _attr(decision, "trade_decision")
+            selected_signal = _attr(trade_decision, "selected_signal")
+            market_context = _attr(selected_signal, "market")
+            entry_price = _attr(market_context, "spot_at_signal")
+            signal_action = _attr(selected_signal, "action")
+            action_value = str(getattr(signal_action, "value", signal_action or "")).strip().lower()
+            stop_loss_level = _hint_underlying_level(_attr(selected_signal, "stop_loss"))
+            target_level = _hint_underlying_level(_attr(selected_signal, "target"))
+
             return SimpleNamespace(
                 reasons=reasons,
                 decision_status=_display(_attr(decision, "decision_status"), PLACEHOLDER),
@@ -462,6 +499,10 @@ class DashboardLiveSessionAdapter:
                 final_lots=_attr(decision, "final_lots"),
                 final_quantity=_attr(decision, "final_quantity"),
                 sizing_reason=_display(sizing_reason, PLACEHOLDER),
+                entry_price=entry_price if isinstance(entry_price, (int, float)) else None,
+                signal_action=action_value,
+                stop_loss_level=stop_loss_level,
+                target_level=target_level,
             )
 
     def get_underlying_candles(

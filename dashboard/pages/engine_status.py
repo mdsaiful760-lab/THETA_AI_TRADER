@@ -26,21 +26,29 @@ def _render_body(ctx: DashboardRenderContext) -> None:
         render_error(f"Engine status unavailable: {exc}")
         overview = DashboardOverviewView()
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     col1.metric("Overall Health", overview.engines_overall_health)
-    running = sum(1 for row in overview.engines if row.running)
-    col2.metric("Components Running", f"{running} / {len(overview.engines)}")
+    healthy = sum(1 for row in overview.engines if row.state == "healthy")
+    down = sum(1 for row in overview.engines if row.state == "down")
+    col2.metric("Healthy", f"{healthy} / {len(overview.engines)}")
+    col3.metric("Down", f"{down} / {len(overview.engines)}")
 
     if not overview.engines:
         st.info("No engine handles registered")
         return
 
+    state_label = {"healthy": "🟢 Healthy", "degraded": "🟡 Degraded", "down": "🔴 Down"}
     frame = pd.DataFrame(
         [
-            (row.name, "Running" if row.running else "Stopped", row.latency_display)
+            (
+                row.name,
+                state_label.get(row.state, "🔴 Down"),
+                row.latency_display,
+                row.heartbeat,
+            )
             for row in overview.engines
         ],
-        columns=["Component", "State", "Response Time"],
+        columns=["Component", "State", "Response Time", "Last Heartbeat"],
     )
     render_table(frame)
     st.caption(

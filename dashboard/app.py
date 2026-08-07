@@ -93,10 +93,12 @@ def main() -> None:
     apply_theme()
     ensure_session_state(default_page=config.default_page)
     ctx = build_render_context()
+    runtime_state = ctx.facade.get_runtime_state()
     render_topbar(
         ctx,
         indices=resolve_home_indices(ctx),
-        broker_status=ctx.facade.get_runtime_state().broker_status,
+        market_status=runtime_state.market_status,
+        broker_status=runtime_state.broker_status,
         websocket_status=ctx.facade.get_websocket_status(),
         alert_count=_real_alert_count(ctx),
     )

@@ -6,11 +6,13 @@ import pandas as pd
 import streamlit as st
 
 
-def render_table(df: pd.DataFrame, *, height: int | None = None) -> None:
-    """Render a dataframe with consistent dashboard styling.
+def render_table(
+    df: "pd.DataFrame | pd.io.formats.style.Styler", *, height: int | None = None
+) -> None:
+    """Render a dataframe (optionally pre-styled) with consistent dashboard styling.
 
     Args:
-        df: Dataframe to display.
+        df: Dataframe or Styler to display.
         height: Optional fixed viewport height.
     """
     kwargs: dict[str, object] = {

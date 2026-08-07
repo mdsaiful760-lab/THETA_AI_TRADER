@@ -12,7 +12,12 @@ from dashboard.components.error_banner import render_error
 from dashboard.components.kpi_cards import render_kpi_row
 from dashboard.components.page_header import render_page_header
 from dashboard.utils.autorefresh import live_fragment
-from dashboard.view_models import DashboardRenderContext, KpiCardModel, PaperTradingPageView
+from dashboard.view_models import (
+    DashboardRenderContext,
+    KpiCardModel,
+    PLACEHOLDER,
+    PaperTradingPageView,
+)
 
 _logger = logging.getLogger("dashboard.pages.positions")
 
@@ -33,6 +38,7 @@ def _render_body(ctx: DashboardRenderContext) -> None:
             KpiCardModel("Total Positions", str(len(view.positions))),
             KpiCardModel("Unrealized P&L", view.unrealized_pnl),
             KpiCardModel("Realized P&L", view.realized_pnl),
+            KpiCardModel("Exposure", view.exposure),
         )
     )
 
@@ -44,17 +50,23 @@ def _render_body(ctx: DashboardRenderContext) -> None:
         [
             (
                 pos.symbol, pos.strategy, pos.quantity, pos.entry,
-                pos.current, pos.mtm, pos.status,
+                pos.current, pos.mtm, pos.exposure, pos.delta, pos.gamma,
+                pos.theta, pos.vega, pos.status,
             )
             for pos in view.positions
         ],
-        columns=["Symbol", "Strategy", "Qty", "Entry", "Current", "MTM", "Status"],
+        columns=[
+            "Symbol", "Strategy", "Qty", "Entry", "Current", "MTM", "Exposure",
+            "Delta", "Gamma", "Theta", "Vega", "Status",
+        ],
     )
     render_table(frame, height=480)
-    st.caption(
-        "Per-position Greeks require the position's own live instrument quote — "
-        "see Greeks Intelligence for the full chain-level view"
-    )
+    if any(pos.delta == PLACEHOLDER for pos in view.positions):
+        st.caption(
+            "Per-position Greeks have no per-instrument field in the paper trading "
+            "engine yet — shown as honest placeholders, never fabricated. See Greeks "
+            "Intelligence for the full chain-level view."
+        )
 
 
 def render(ctx: DashboardRenderContext) -> None:

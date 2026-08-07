@@ -239,8 +239,12 @@ class TestLiveMapping:
                         active, history = [
                             call.args[0] for call in table.call_args_list
                         ]
-                        assert not active.empty
-                        assert not history.empty
+                        # Non-empty tables are now wrapped in a Styler for
+                        # real Status-driven row color coding.
+                        active_df = active.data if hasattr(active, "data") else active
+                        history_df = history.data if hasattr(history, "data") else history
+                        assert not active_df.empty
+                        assert not history_df.empty
 
     def test_resolve_exception_falls_back_to_placeholders(self) -> None:
         broken = MagicMock()

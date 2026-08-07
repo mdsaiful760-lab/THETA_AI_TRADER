@@ -63,8 +63,24 @@ def _sparkline_svg(values: tuple[float, ...], *, color: str) -> str:
     )
 
 
+def _trend_arrow(trend: tuple[float, ...]) -> str:
+    """Real trend-direction arrow from the last two real captured readings.
+
+    Never fabricated — returns a neutral dash until at least two real
+    readings have actually been observed.
+    """
+    if len(trend) < 2:
+        return "<span class='theta-trend-arrow flat'>&#8212;</span>"
+    delta = trend[-1] - trend[-2]
+    if delta > 0:
+        return "<span class='theta-trend-arrow up'>&#9650;</span>"
+    if delta < 0:
+        return "<span class='theta-trend-arrow down'>&#9660;</span>"
+    return "<span class='theta-trend-arrow flat'>&#8212;</span>"
+
+
 def render_metric_cards(cards: tuple[MetricCardView, ...], *, spark_color: str = "#3D8BFF") -> None:
-    """Render the top-row metric cards (Market Regime / VIX / PCR / Max Pain / FII-DII)."""
+    """Render the top-row premium metric cards (Market Regime / VIX / PCR / Max Pain / FII-DII)."""
     if not cards:
         return
     columns = st.columns(len(cards))
@@ -87,6 +103,7 @@ def render_metric_cards(cards: tuple[MetricCardView, ...], *, spark_color: str =
                 )
                 continue
             spark = _sparkline_svg(card.trend, color=spark_color)
+            arrow = _trend_arrow(card.trend)
             st.markdown(
                 (
                     "<div class='theta-metric-card'>"
@@ -94,7 +111,10 @@ def render_metric_cards(cards: tuple[MetricCardView, ...], *, spark_color: str =
                     f"<span>{html.escape(card.label)}</span>"
                     f"<span class='theta-metric-icon'>{icon}</span>"
                     "</div>"
-                    f"<div class='theta-metric-value'>{html.escape(card.value)}</div>"
+                    "<div class='theta-metric-value-row'>"
+                    f"<span class='theta-metric-value'>{html.escape(card.value)}</span>"
+                    f"{arrow}"
+                    "</div>"
                     f"<div class='theta-metric-caption'>{html.escape(card.caption)}</div>"
                     f"{spark}"
                     "</div>"
@@ -127,8 +147,10 @@ def render_engine_status(rows: tuple[EngineStatusRow, ...], *, overall_health: s
         return
     body = []
     for row in rows:
-        dot_class = "up" if row.running else "down"
-        state_label = "Running" if row.running else "Stopped"
+        dot_class = {"healthy": "up", "degraded": "warn", "down": "down"}.get(row.state, "down")
+        state_label = {"healthy": "Healthy", "degraded": "Degraded", "down": "Down"}.get(
+            row.state, "Down"
+        )
         body.append(
             "<div class='theta-engine-row'>"
             "<span class='theta-engine-name'>"
@@ -137,37 +159,69 @@ def render_engine_status(rows: tuple[EngineStatusRow, ...], *, overall_health: s
             "<span class='theta-engine-right'>"
             f"<span>{html.escape(state_label)}</span>"
             f"<span>{html.escape(row.latency_display)}</span>"
+            f"<span class='theta-engine-heartbeat'>{html.escape(row.heartbeat)}</span>"
             "</span></div>"
         )
     st.markdown("".join(body), unsafe_allow_html=True)
 
 
-def render_oi_buildup(
-    calls: tuple[OiBuildupRow, ...], puts: tuple[OiBuildupRow, ...]
-) -> None:
-    """Render the Option Summary panel (top real OI build-up, CALLS/PUTS tabs)."""
-    st.markdown("<div class='theta-panel-title'>Option Summary</div>", unsafe_allow_html=True)
-    calls_tab, puts_tab = st.tabs(["CALLS", "PUTS"])
-    columns = ["Strike", "OI", "OI Chg", "LTP", "Trend"]
-    for tab, rows in ((calls_tab, calls), (puts_tab, puts)):
-        with tab:
-            if not rows:
-                st.caption("Option chain unavailable — awaiting backend market snapshot")
-                continue
-            frame = pd.DataFrame(
-                [
-                    (
-                        row.strike,
-                        row.open_interest,
-                        row.change_percent,
-                        row.ltp,
-                        "▲" if row.trend == "up" else "▼" if row.trend == "down" else "—",
-                    )
-                    for row in rows
-                ],
-                columns=columns,
+def _oi_rows_table(rows: tuple[OiBuildupRow, ...], *, value_label: str) -> None:
+    """Render one CALLS/PUTS ranked table (shared by Top OI and Top Volume)."""
+    if not rows:
+        st.caption("Option chain unavailable — awaiting backend market snapshot")
+        return
+    frame = pd.DataFrame(
+        [
+            (
+                row.strike,
+                row.open_interest,
+                row.change_percent,
+                row.ltp,
+                "▲" if row.trend == "up" else "▼" if row.trend == "down" else "—",
             )
-            render_table(frame)
+            for row in rows
+        ],
+        columns=["Strike", value_label, "OI Chg", "LTP", "Trend"],
+    )
+    render_table(frame)
+
+
+def render_option_summary(
+    *,
+    atm_strike: str,
+    atm_iv: str,
+    pcr: str,
+    max_pain: str,
+    nearest_expiry: str,
+    oi_calls: tuple[OiBuildupRow, ...],
+    oi_puts: tuple[OiBuildupRow, ...],
+    volume_calls: tuple[OiBuildupRow, ...],
+    volume_puts: tuple[OiBuildupRow, ...],
+) -> None:
+    """Render the Option Summary panel: real ATM/IV/PCR/Max Pain/Expiry
+    KPIs plus real Top OI and Top Volume rankings (CALLS/PUTS)."""
+    st.markdown("<div class='theta-panel-title'>Option Summary</div>", unsafe_allow_html=True)
+
+    row1 = st.columns(3)
+    row1[0].metric("ATM Strike", atm_strike)
+    row1[1].metric("ATM IV", atm_iv)
+    row1[2].metric("PCR", pcr)
+    row2 = st.columns(2)
+    row2[0].metric("Max Pain", max_pain)
+    row2[1].metric("Nearest Expiry", nearest_expiry)
+
+    metric_choice = st.radio(
+        "Rank by", options=("Top OI", "Top Volume"), horizontal=True,
+        label_visibility="collapsed", key="theta_option_summary_metric",
+    )
+    calls, puts, value_label = (
+        (oi_calls, oi_puts, "OI") if metric_choice == "Top OI" else (volume_calls, volume_puts, "Volume")
+    )
+    calls_tab, puts_tab = st.tabs(["CALLS", "PUTS"])
+    with calls_tab:
+        _oi_rows_table(calls, value_label=value_label)
+    with puts_tab:
+        _oi_rows_table(puts, value_label=value_label)
 
 
 def render_strategy_scanner(rows: tuple[ScannerRow, ...]) -> None:
@@ -177,17 +231,32 @@ def render_strategy_scanner(rows: tuple[ScannerRow, ...]) -> None:
         st.caption("No monitored strategies available")
         return
     frame = pd.DataFrame(
-        [(row.strategy, row.score, row.signal, row.confidence) for row in rows],
-        columns=["Strategy", "Score", "Signal", "Confidence"],
+        [
+            (
+                row.strategy, row.confidence, row.expected_pop, row.expected_roi,
+                row.expected_theta, row.status,
+            )
+            for row in rows
+        ],
+        columns=[
+            "Strategy", "Confidence", "Expected POP", "Expected ROI", "Expected Theta", "Status",
+        ],
     )
     render_table(frame)
+    if any(row.expected_roi == PLACEHOLDER for row in rows):
+        st.caption(
+            "Expected ROI and Expected Theta have no corresponding field in the "
+            "strategy evaluation engine yet — shown as placeholders, never fabricated."
+        )
 
 
-def render_alerts(alerts: tuple[AlertRow, ...]) -> None:
-    """Render the Recent Alerts feed from real structured log entries."""
-    st.markdown("<div class='theta-panel-title'>Recent Alerts</div>", unsafe_allow_html=True)
+_ALERT_CATEGORIES: tuple[str, ...] = ("All", "Market", "AI", "Broker", "Execution", "System")
+
+
+def _render_alert_rows(alerts: tuple[AlertRow, ...]) -> None:
+    """Render one flat real alert timeline."""
     if not alerts:
-        st.caption("No recent log activity")
+        st.caption("No alerts in this category")
         return
     body = []
     for alert in alerts:
@@ -197,12 +266,31 @@ def render_alerts(alerts: tuple[AlertRow, ...]) -> None:
             f"<span class='theta-alert-dot' style='background:{color};'></span>"
             "<div>"
             f"<div class='theta-alert-title'>{html.escape(alert.title)}</div>"
-            f"<div class='theta-alert-detail'>{html.escape(alert.detail)}</div>"
+            f"<div class='theta-alert-detail'>{html.escape(alert.category)} · "
+            f"{html.escape(alert.detail)}</div>"
             "</div>"
             f"<span class='theta-alert-time'>{html.escape(alert.timestamp)}</span>"
             "</div>"
         )
     st.markdown("".join(body), unsafe_allow_html=True)
+
+
+def render_alerts(alerts: tuple[AlertRow, ...]) -> None:
+    """Render the Recent Alerts timeline, filterable by real category
+    (Market / AI / Broker / Execution / System) derived from each real log
+    entry's own logger name."""
+    st.markdown("<div class='theta-panel-title'>Recent Alerts</div>", unsafe_allow_html=True)
+    if not alerts:
+        st.caption("No recent log activity")
+        return
+    present = {alert.category for alert in alerts}
+    options = tuple(cat for cat in _ALERT_CATEGORIES if cat == "All" or cat in present)
+    choice = st.radio(
+        "Alert category", options=options, horizontal=True,
+        label_visibility="collapsed", key="theta_alerts_category",
+    )
+    filtered = alerts if choice == "All" else tuple(a for a in alerts if a.category == choice)
+    _render_alert_rows(filtered)
 
 
 def render_market_breadth_placeholder() -> None:
@@ -211,7 +299,7 @@ def render_market_breadth_placeholder() -> None:
     st.markdown(
         (
             "<div class='theta-unavailable-panel' style='padding:1.4rem 1rem;'>"
-            "<div class='title' style='font-size:0.92rem;'>Not available</div>"
+            "<div class='title' style='font-size:0.92rem;'>Feed unavailable</div>"
             "<div>This platform has no NSE-wide advance/decline feed — "
             "only the configured index underlyings are tracked.</div>"
             "</div>"
