@@ -10,7 +10,8 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Callable, Mapping
 
@@ -21,6 +22,36 @@ _logger = logging.getLogger("dashboard.live_session_adapter")
 
 INDEX_UNDERLYINGS: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "SENSEX")
 INDIA_VIX_SYMBOL: str = "INDIA VIX"
+
+_OPTION_CHAIN_COLUMNS: tuple[str, ...] = (
+    "strike",
+    "type",
+    "ltp",
+    "bid",
+    "ask",
+    "oi",
+    "oi_change",
+    "volume",
+    "iv",
+    "delta",
+    "gamma",
+    "theta",
+    "vega",
+)
+
+# Real Zerodha/NSE quote keys for chart candle fetches — the same identity
+# format the broker's own historical-data REST call expects.
+_UNDERLYING_QUOTE_KEYS: Mapping[str, str] = {
+    "NIFTY": "NSE:NIFTY 50",
+    "BANKNIFTY": "NSE:BANKNIFTY",
+    "FINNIFTY": "NSE:FINNIFTY",
+    # Same real NSE trading symbol -> underlying mapping already used by
+    # broker/instrument_loader.py ("NIFTY MID SELECT": "MIDCPNIFTY").
+    "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
+    "SENSEX": "BSE:SENSEX",
+}
+_CANDLE_INTERVAL = "5minute"
+_CANDLE_LOOKBACK = timedelta(days=5)
 
 _LIVE_HANDLES_LOCK = threading.RLock()
 _REGISTERED_HANDLES: DashboardLiveHandles | None = None
@@ -36,6 +67,26 @@ def _attr(obj: object | None, name: str, default: object = None) -> object:
     if obj is None:
         return default
     return getattr(obj, name, default)
+
+
+def _hint_underlying_level(hint: object | None) -> float | None:
+    """Return a stop-loss/target hint's real absolute underlying level.
+
+    Only ``UNDERLYING_LEVEL``-typed hints carry a value directly plottable
+    on the underlying index chart (an absolute index point level). Other
+    hint types (premium multiple, percent-of-capital, structure breach,
+    time stop) describe the option structure's own premium/capital, not a
+    point on the underlying's price axis — plotting those would misrepresent
+    the value, so they are intentionally omitted rather than converted.
+    """
+    if hint is None:
+        return None
+    hint_type = getattr(hint, "hint_type", None)
+    hint_type_value = str(getattr(hint_type, "value", hint_type or "")).strip().lower()
+    if hint_type_value != "underlying_level":
+        return None
+    value = getattr(hint, "value", None)
+    return float(value) if isinstance(value, (int, float)) else None
 
 
 def _field(obj: object | None, *names: str, default: object = None) -> object:
@@ -89,6 +140,10 @@ class DashboardLiveHandles:
         market_regime_provider: Returns a regime snapshot/label or ``None``.
         scoring_framework: ``StrategyScoringFramework``-like observability
             API (``health`` / ``statistics`` only).
+        ai_decision_loop: ``AIDecisionLoop``-like read API
+            (``get_latest_decision`` / ``get_health`` / ``config``) used
+            only for already-computed reasoning text and cycle timing —
+            never invoked to run a cycle.
     """
 
     integration_session: object | None = None
@@ -98,6 +153,7 @@ class DashboardLiveHandles:
     evaluation_bundle_provider: Callable[[], object | None] | None = None
     market_regime_provider: Callable[[], object | None] | None = None
     scoring_framework: object | None = None
+    ai_decision_loop: object | None = None
 
     def has_any_live_source(self) -> bool:
         """Return ``True`` when at least one live handle is present."""
@@ -110,6 +166,7 @@ class DashboardLiveHandles:
                 self.evaluation_bundle_provider is not None,
                 self.market_regime_provider is not None,
                 self.scoring_framework is not None,
+                self.ai_decision_loop is not None,
             )
         )
 
@@ -145,6 +202,18 @@ class DashboardLiveSessionAdapter:
         self._clock = clock or _utc_now
         self._lock = threading.RLock()
         self._evaluation_cache = _CachedEvaluation()
+        # Real Zerodha option-chain rows carry today's open interest but no
+        # baseline to diff against — OI change is derived here by comparing
+        # each poll's OI to the previous poll's, per instrument, entirely
+        # from real observed values (never fabricated; empty until a second
+        # real observation exists).
+        self._previous_oi: dict[str, int] = {}
+        # Real equity readings captured on every poll since this dashboard
+        # process started (never backfilled/estimated) — the paper ledger
+        # itself has no historical time series, so this is the only honest
+        # source for an equity/drawdown curve.
+        self._equity_history: list[tuple[datetime, float]] = []
+        self._equity_history_max: int = 1000
 
     @property
     def handles(self) -> DashboardLiveHandles:
@@ -288,6 +357,10 @@ class DashboardLiveSessionAdapter:
             if snapshot is None:
                 return None
             underlying = _attr(snapshot, "underlying")
+            option_chain = _attr(snapshot, "option_chain")
+            metadata = _attr(option_chain, "metadata")
+            atm_strike = _attr(metadata, "atm_strike")
+            expiry = _attr(metadata, "expiry")
             return SimpleNamespace(
                 underlyings=list(INDEX_UNDERLYINGS),
                 selected_underlying=_display(_attr(underlying, "symbol"), selected),
@@ -295,8 +368,198 @@ class DashboardLiveSessionAdapter:
                 change=_attr(underlying, "change"),
                 volume=_attr(underlying, "volume"),
                 indices={quote.symbol: quote for quote in self.get_index_quotes()},
-                option_chain_columns=("strike", "type", "ltp", "oi", "iv"),
-                option_chain_rows=(),
+                option_chain_columns=_OPTION_CHAIN_COLUMNS,
+                option_chain_rows=self._option_chain_rows(option_chain),
+                atm_strike=_display(atm_strike, PLACEHOLDER),
+                nearest_expiry=_display(expiry, PLACEHOLDER),
+            )
+
+    def _option_chain_rows(self, option_chain: object | None) -> tuple[tuple[str, ...], ...]:
+        """Build real option-chain display rows from live contract quotes.
+
+        Every value is read directly off ``OptionContractSnapshot``
+        (strike/type/ltp/bid/ask/oi/volume/iv/delta/gamma/theta/vega) —
+        never estimated. ``oi_change`` is the one derived value: this
+        poll's open interest minus the previous poll's for the same
+        instrument, both real observations: it just diffs two real
+        readings rather than fabricating a baseline.
+        """
+        contracts = _attr(option_chain, "contracts") or ()
+        rows: list[tuple[str, ...]] = []
+        current_oi: dict[str, int] = {}
+        for contract in contracts:
+            instrument_key = str(_attr(contract, "tradingsymbol", default=""))
+            open_interest = _attr(contract, "open_interest")
+            if isinstance(open_interest, (int, float)):
+                current_oi[instrument_key] = int(open_interest)
+                previous = self._previous_oi.get(instrument_key)
+                oi_change = str(int(open_interest) - previous) if previous is not None else PLACEHOLDER
+            else:
+                oi_change = PLACEHOLDER
+            option_type = _attr(contract, "option_type")
+            rows.append(
+                (
+                    _display(_attr(contract, "strike"), PLACEHOLDER),
+                    _display(getattr(option_type, "value", option_type), PLACEHOLDER),
+                    _display(_attr(contract, "ltp"), PLACEHOLDER),
+                    _display(_attr(contract, "bid"), PLACEHOLDER),
+                    _display(_attr(contract, "ask"), PLACEHOLDER),
+                    _display(open_interest, PLACEHOLDER),
+                    oi_change,
+                    _display(_attr(contract, "volume"), PLACEHOLDER),
+                    _display(_attr(contract, "iv"), PLACEHOLDER),
+                    _display(_attr(contract, "delta"), PLACEHOLDER),
+                    _display(_attr(contract, "gamma"), PLACEHOLDER),
+                    _display(_attr(contract, "theta"), PLACEHOLDER),
+                    _display(_attr(contract, "vega"), PLACEHOLDER),
+                )
+            )
+        self._previous_oi = current_oi
+        return tuple(rows)
+
+    def get_ai_panel(self) -> object | None:
+        """Return AI reasoning and next-evaluation countdown from the decision loop.
+
+        Reads only already-computed values via ``AIDecisionLoop``'s own
+        public accessors (``get_latest_decision`` / ``get_health`` /
+        ``config``) — never triggers a cycle.
+
+        Returns:
+            ``None`` when no ``ai_decision_loop`` handle is registered or
+            no decision has run yet; otherwise a namespace with
+            ``reasons``, ``decision_status``, ``strategy_id``,
+            ``next_evaluation_seconds`` (``None`` when unknown), and
+            ``next_evaluation_display``.
+        """
+        with self._lock:
+            loop = self._handles.ai_decision_loop
+            if loop is None:
+                return None
+            get_latest_decision = getattr(loop, "get_latest_decision", None)
+            decision = get_latest_decision() if callable(get_latest_decision) else None
+            if decision is None:
+                return None
+
+            reasons = tuple(_attr(decision, "reasons", default=()) or ())
+            sizing_reason = _attr(decision, "sizing_reason")
+            if sizing_reason and sizing_reason not in reasons:
+                reasons = reasons + (str(sizing_reason),)
+
+            next_eval_seconds: float | None = None
+            get_health = getattr(loop, "get_health", None)
+            health = get_health() if callable(get_health) else None
+            config = getattr(loop, "config", None)
+            interval_seconds = _attr(config, "interval_seconds")
+            last_cycle_at = _attr(health, "last_cycle_at")
+            if isinstance(interval_seconds, (int, float)) and isinstance(last_cycle_at, datetime):
+                elapsed = (self._clock() - last_cycle_at).total_seconds()
+                next_eval_seconds = max(0.0, float(interval_seconds) - elapsed)
+
+            next_eval_display = (
+                f"{int(next_eval_seconds)}s" if next_eval_seconds is not None else PLACEHOLDER
+            )
+
+            raw_status = _attr(decision, "status")
+            status_value = str(getattr(raw_status, "value", raw_status or "")).strip().lower()
+            decision_as_of = _attr(decision, "as_of")
+
+            # Real per-signal entry/SL/target levels from the same sealed
+            # trade decision — relayed only, never fabricated or derived
+            # from a hint type this adapter cannot honestly convert.
+            trade_decision = _attr(decision, "trade_decision")
+            selected_signal = _attr(trade_decision, "selected_signal")
+            market_context = _attr(selected_signal, "market")
+            entry_price = _attr(market_context, "spot_at_signal")
+            signal_action = _attr(selected_signal, "action")
+            action_value = str(getattr(signal_action, "value", signal_action or "")).strip().lower()
+            stop_loss_level = _hint_underlying_level(_attr(selected_signal, "stop_loss"))
+            target_level = _hint_underlying_level(_attr(selected_signal, "target"))
+
+            return SimpleNamespace(
+                reasons=reasons,
+                decision_status=_display(_attr(decision, "decision_status"), PLACEHOLDER),
+                risk_verdict=_display(_attr(decision, "risk_verdict"), PLACEHOLDER),
+                strategy_id=_display(_attr(decision, "strategy_id"), PLACEHOLDER),
+                next_evaluation_seconds=next_eval_seconds,
+                next_evaluation_display=next_eval_display,
+                # Real decision-cycle fields carried through for chart signal
+                # markers — never computed or inferred, only relayed.
+                signal_active=status_value == "trade_candidate",
+                as_of=decision_as_of if isinstance(decision_as_of, datetime) else None,
+                underlying=_display(_attr(decision, "underlying"), PLACEHOLDER),
+                # Real, already-computed position-sizing/risk-budget fields
+                # from the same decision object — relayed only, never
+                # recomputed or estimated by the dashboard.
+                market_regime=_display(_attr(decision, "market_regime"), PLACEHOLDER),
+                regime_confidence=_display(_attr(decision, "regime_confidence"), PLACEHOLDER),
+                strategy_family=_display(_attr(decision, "strategy_family"), PLACEHOLDER),
+                confidence_score=_attr(decision, "confidence_score"),
+                approved_risk_budget=_attr(decision, "approved_risk_budget"),
+                approved_risk_pct=_attr(decision, "approved_risk_pct"),
+                final_lots=_attr(decision, "final_lots"),
+                final_quantity=_attr(decision, "final_quantity"),
+                sizing_reason=_display(sizing_reason, PLACEHOLDER),
+                entry_price=entry_price if isinstance(entry_price, (int, float)) else None,
+                signal_action=action_value,
+                stop_loss_level=stop_loss_level,
+                target_level=target_level,
+            )
+
+    def get_underlying_candles(
+        self,
+        underlying: str,
+        *,
+        interval: str = _CANDLE_INTERVAL,
+        lookback: timedelta = _CANDLE_LOOKBACK,
+    ) -> object | None:
+        """Return real recent OHLCV candles for ``underlying`` for charting.
+
+        Delegates to the already-connected ``market_streaming`` engine's own
+        ``fetch_historical_candles`` — the same broker link it already uses
+        for live snapshots. Never opens a new broker connection and never
+        estimates or backfills a candle.
+
+        Args:
+            underlying: Underlying symbol.
+            interval: Real broker candle interval (e.g. ``"5minute"``,
+                ``"day"``) — passed straight through to the same
+                already-connected fetch, never fabricated.
+            lookback: Real time span to request, ending now.
+
+        Returns:
+            ``None`` when no streaming handle is registered, the underlying
+            is unrecognized, or the fetch fails; otherwise a namespace with
+            ``underlying``, ``interval``, and raw broker ``candles`` rows.
+        """
+        with self._lock:
+            engine = self._handles.market_streaming
+            if engine is None:
+                return None
+            quote_key = _UNDERLYING_QUOTE_KEYS.get(underlying.strip().upper())
+            if quote_key is None:
+                return None
+            fetch = getattr(engine, "fetch_historical_candles", None)
+            if not callable(fetch):
+                return None
+            now = self._clock()
+            request = SimpleNamespace(
+                instrument_key=quote_key,
+                interval=interval,
+                from_ts=now - lookback,
+                to_ts=now,
+                continuous=False,
+                correlation_id=None,
+            )
+            try:
+                result = fetch(request)
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("live adapter candle fetch failed: %s", exc)
+                return None
+            rows = _attr(result, "candles", default=()) or ()
+            return SimpleNamespace(
+                underlying=underlying,
+                interval=interval,
+                candles=tuple(rows),
             )
 
     def get_strategy_evaluation_summary(self) -> object | None:
@@ -369,6 +632,18 @@ class DashboardLiveSessionAdapter:
             cash = _field(capital, "cash", "available_cash")
             if cash is None and portfolio is not None:
                 cash = _field(_attr(portfolio, "capital"), "cash", "available_cash")
+            unrealized_pnl = _field(portfolio, "total_unrealized_pnl", "unrealized_pnl")
+            starting_cash = _field(capital, "starting_cash")
+
+            equity_series, drawdown_series = self._record_and_build_equity_curve(
+                cash=cash, unrealized_pnl=unrealized_pnl
+            )
+            total_equity = equity_series[-1][1] if equity_series else None
+            roi = None
+            if total_equity is not None and isinstance(starting_cash, (int, float, Decimal)):
+                base = float(starting_cash)
+                if base:
+                    roi = ((total_equity - base) / base) * 100.0
 
             return SimpleNamespace(
                 available_cash=cash,
@@ -378,18 +653,46 @@ class DashboardLiveSessionAdapter:
                 portfolio_view=portfolio,
                 capital_used=_field(capital, "reserved_margin_hint", "capital_used")
                 or _field(portfolio, "gross_notional"),
-                total_equity=None,
+                total_equity=total_equity,
                 todays_pnl=_field(portfolio, "todays_pnl", "daily_pnl"),
                 realized_pnl=_field(portfolio, "total_realized_pnl", "realized_pnl")
                 or _field(capital, "cumulative_realized_pnl"),
-                unrealized_pnl=_field(
-                    portfolio,
-                    "total_unrealized_pnl",
-                    "unrealized_pnl",
-                ),
+                unrealized_pnl=unrealized_pnl,
                 positions=positions,
-                equity_series=(),
+                equity_series=equity_series,
+                drawdown_series=drawdown_series,
+                roi=roi,
             )
+
+    def _record_and_build_equity_curve(
+        self, *, cash: object, unrealized_pnl: object
+    ) -> tuple[tuple[tuple[str, float], ...], tuple[tuple[str, float], ...]]:
+        """Append this poll's real equity reading and derive the curves.
+
+        Equity is ``cash + unrealized_pnl`` — both already-computed real
+        ledger values, never estimated. Drawdown is the running peak minus
+        the current reading over the same real, captured-since-startup
+        history (empty at process start; grows one point per poll).
+        """
+        if not isinstance(cash, (int, float, Decimal)) or not isinstance(
+            unrealized_pnl, (int, float, Decimal)
+        ):
+            return (), ()
+        equity = float(cash) + float(unrealized_pnl)
+        now = self._clock()
+        self._equity_history.append((now, equity))
+        if len(self._equity_history) > self._equity_history_max:
+            self._equity_history = self._equity_history[-self._equity_history_max :]
+
+        equity_series = tuple(
+            (timestamp.isoformat(), value) for timestamp, value in self._equity_history
+        )
+        peak = float("-inf")
+        drawdown_points: list[tuple[str, float]] = []
+        for timestamp, value in self._equity_history:
+            peak = max(peak, value)
+            drawdown_points.append((timestamp.isoformat(), value - peak))
+        return equity_series, tuple(drawdown_points)
 
     def get_paper_positions(self) -> object | None:
         """Facade companion alias for paper positions."""
@@ -437,6 +740,22 @@ class DashboardLiveSessionAdapter:
         if not self._is_market_connected():
             return "OFFLINE"
         return "LIVE"
+
+    def get_websocket_status(self) -> str:
+        """Return the real raw WebSocket connection status.
+
+        Reads the already-connected ``kite_websocket`` handle's own
+        ``get_status()`` — the same read ``_is_market_connected()`` already
+        performs — never opens a new connection.
+        """
+        with self._lock:
+            ws = self._handles.kite_websocket
+            if ws is None or not callable(getattr(ws, "get_status", None)):
+                return PLACEHOLDER
+            try:
+                return _display(_enum_value(ws.get_status()).upper() or None, PLACEHOLDER)
+            except Exception:  # noqa: BLE001
+                return PLACEHOLDER
 
     def _scoring_health_state(self) -> str:
         """Read scoring framework health without scoring."""

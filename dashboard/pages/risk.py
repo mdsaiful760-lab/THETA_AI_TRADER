@@ -5,16 +5,12 @@ from __future__ import annotations
 import streamlit as st
 
 from dashboard.components.page_header import render_page_header
+from dashboard.utils.autorefresh import live_fragment
 from dashboard.view_models import DashboardRenderContext
 
 
-def render(ctx: DashboardRenderContext) -> None:
-    """Render the risk page.
-
-    Args:
-        ctx: Immutable render context with facade and session handles.
-    """
-    render_page_header("Risk", "Last verdict and configured limits")
+def _render_body(ctx: DashboardRenderContext) -> None:
+    """Render the risk page body (re-invoked on every live refresh tick)."""
     snapshot = ctx.facade.get_risk()
 
     st.markdown(
@@ -42,3 +38,20 @@ def render(ctx: DashboardRenderContext) -> None:
         st.info("Redacted risk limits unavailable")
 
     st.caption("Risk override controls are not available in dashboard v1")
+
+
+def render(ctx: DashboardRenderContext) -> None:
+    """Render the risk page.
+
+    Args:
+        ctx: Immutable render context with facade and session handles.
+    """
+    render_page_header("Risk Dashboard", "Last verdict and configured limits")
+    if not ctx.config.enable_autorefresh:
+        _render_body(ctx)
+        return
+    live_fragment(
+        lambda: _render_body(ctx),
+        interval_seconds=ctx.config.refresh_interval_seconds,
+        key="risk_refresh",
+    )

@@ -14,6 +14,7 @@ from dashboard.components.kpi_cards import render_kpi_row
 from dashboard.components.page_header import render_page_header
 from dashboard.components.plotly_charts import build_allocation_pie, build_equity_curve
 from dashboard.facade import NullIntegrationFacade
+from dashboard.utils.autorefresh import live_fragment
 from dashboard.view_models import (
     DashboardRenderContext,
     PLACEHOLDER,
@@ -345,7 +346,14 @@ def render(ctx: DashboardRenderContext) -> None:
         ctx: Immutable render context with facade and session handles.
     """
     render_page_header("Portfolio", "Holdings, allocation, and exposure (read-only)")
-    _render_portfolio_body(ctx)
+    if not ctx.config.enable_autorefresh:
+        _render_portfolio_body(ctx)
+        return
+    live_fragment(
+        lambda: _render_portfolio_body(ctx),
+        interval_seconds=ctx.config.refresh_interval_seconds,
+        key="portfolio_refresh",
+    )
 
 
 __all__ = (

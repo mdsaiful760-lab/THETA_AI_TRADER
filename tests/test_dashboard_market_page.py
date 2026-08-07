@@ -174,7 +174,7 @@ class TestMarketPageRender:
                     with patch("dashboard.pages.market.render_kpi_row") as kpi:
                         with patch("dashboard.pages.market.render_table"):
                             with patch(
-                                "dashboard.pages.market.render_tradingview_placeholder"
+                                "dashboard.pages.market.render_lightweight_chart"
                             ) as chart:
                                 market_page.render(ctx)
                                 assert strip.called

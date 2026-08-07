@@ -133,14 +133,15 @@ class TestOfflineRendering:
         active = orders_page._active_orders_frame(view)
         history = orders_page._order_history_frame(view)
         expected_columns = [
-            "Order ID",
             "Time",
-            "Symbol",
+            "Order ID",
             "Strategy",
+            "Instrument",
             "Side",
             "Qty",
-            "Price",
             "Status",
+            "Fill Price",
+            "Latency",
         ]
         assert list(active.columns) == expected_columns
         assert active.empty
@@ -238,8 +239,12 @@ class TestLiveMapping:
                         active, history = [
                             call.args[0] for call in table.call_args_list
                         ]
-                        assert not active.empty
-                        assert not history.empty
+                        # Non-empty tables are now wrapped in a Styler for
+                        # real Status-driven row color coding.
+                        active_df = active.data if hasattr(active, "data") else active
+                        history_df = history.data if hasattr(history, "data") else history
+                        assert not active_df.empty
+                        assert not history_df.empty
 
     def test_resolve_exception_falls_back_to_placeholders(self) -> None:
         broken = MagicMock()
@@ -272,7 +277,10 @@ class TestCharts:
 
     def test_timeline_figure_offline_has_no_traces(self) -> None:
         empty_df = pd.DataFrame(
-            columns=["Order ID", "Time", "Symbol", "Strategy", "Side", "Qty", "Price", "Status"]
+            columns=[
+                "Time", "Order ID", "Strategy", "Instrument", "Side", "Qty", "Status",
+                "Fill Price", "Latency",
+            ]
         )
         figure = orders_page._build_order_timeline_figure(empty_df)
         assert figure.data == ()
@@ -301,7 +309,7 @@ class TestCsvExport:
         df = orders_page._order_history_frame(view)
         csv_text = orders_page._orders_csv(df)
         assert csv_text.strip() == (
-            "Order ID,Time,Symbol,Strategy,Side,Qty,Price,Status"
+            "Time,Order ID,Strategy,Instrument,Side,Qty,Status,Fill Price,Latency"
         )
 
 

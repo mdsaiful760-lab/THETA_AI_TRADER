@@ -15,6 +15,7 @@ from dashboard.components.kpi_cards import render_kpi_row
 from dashboard.components.page_header import render_page_header
 from dashboard.components.plotly_charts import build_allocation_pie
 from dashboard.facade import NullIntegrationFacade
+from dashboard.utils.autorefresh import live_fragment
 from dashboard.view_models import (
     DashboardRenderContext,
     OrdersPageView,
@@ -27,14 +28,15 @@ from dashboard.view_models import (
 _logger = logging.getLogger("dashboard.pages.orders")
 
 _ORDER_COLUMNS: tuple[str, ...] = (
-    "Order ID",
     "Time",
-    "Symbol",
+    "Order ID",
     "Strategy",
+    "Instrument",
     "Side",
     "Qty",
-    "Price",
     "Status",
+    "Fill Price",
+    "Latency",
 )
 
 _TERMINAL_STATUSES: frozenset[str] = frozenset(
@@ -59,6 +61,28 @@ _STATUS_COLORS: dict[str, str] = {
     "REJECTED": "#E74C3C",
 }
 _DEFAULT_STATUS_COLOR: str = "#3D8BFF"
+
+
+def _style_by_status(df: pd.DataFrame) -> "pd.io.formats.style.Styler | pd.DataFrame":
+    """Apply real Status-driven row color coding — same palette as the timeline.
+
+    Pure display styling — never mutates order data or recomputes status.
+
+    Args:
+        df: Orders dataframe with a ``Status`` column.
+
+    Returns:
+        Styled dataframe (or the original when empty / no Status column).
+    """
+    if df.empty or "Status" not in df.columns:
+        return df
+
+    def _row_style(row: pd.Series) -> list[str]:
+        color = _STATUS_COLORS.get(str(row.get("Status", "")).strip().upper(), _DEFAULT_STATUS_COLOR)
+        # Low-alpha background tint keeps text legible while still color-coding the row.
+        return [f"background-color: {color}22" for _ in row]
+
+    return df.style.apply(_row_style, axis=1)
 
 
 def _display(value: object | None, placeholder: str = PLACEHOLDER) -> str:
@@ -119,14 +143,18 @@ def _orders_frame(orders: Sequence[object]) -> pd.DataFrame:
     for order in orders:
         rows.append(
             {
-                "Order ID": _display(getattr(order, "order_id", None)),
                 "Time": _display(getattr(order, "timestamp", None)),
-                "Symbol": _display(getattr(order, "symbol", None)),
+                "Order ID": _display(getattr(order, "order_id", None)),
                 "Strategy": _display(getattr(order, "strategy", None)),
+                "Instrument": _display(getattr(order, "symbol", None)),
                 "Side": _display(getattr(order, "side", None)),
                 "Qty": _display(getattr(order, "quantity", None)),
-                "Price": _display(getattr(order, "price", None)),
                 "Status": _display(getattr(order, "status", None)),
+                "Fill Price": _display(getattr(order, "price", None)),
+                # No submit/fill timestamp pair is exposed by the backend
+                # order source yet — shown as a real placeholder, never a
+                # fabricated duration.
+                "Latency": PLACEHOLDER,
             }
         )
     if not rows:
@@ -226,19 +254,19 @@ def _build_order_timeline_figure(df: pd.DataFrame) -> go.Figure:
     timeline builder exists there yet for this milestone.
 
     Args:
-        df: DataFrame with ``Time``, ``Symbol``, and ``Status`` columns
+        df: DataFrame with ``Time``, ``Instrument``, and ``Status`` columns
             (already-computed upstream display values; nothing is derived).
 
     Returns:
         Dark-themed Plotly figure (empty trace set when ``df`` has no rows).
     """
     figure = go.Figure()
-    if not df.empty and {"Time", "Symbol", "Status"}.issubset(df.columns):
+    if not df.empty and {"Time", "Instrument", "Status"}.issubset(df.columns):
         for status_label, group in df.groupby("Status"):
             figure.add_trace(
                 go.Scatter(
                     x=group["Time"],
-                    y=group["Symbol"],
+                    y=group["Instrument"],
                     mode="markers",
                     name=str(status_label),
                     marker={
@@ -256,7 +284,7 @@ def _build_order_timeline_figure(df: pd.DataFrame) -> go.Figure:
         margin={"l": 24, "r": 24, "t": 36, "b": 24},
         title="Order Timeline",
         xaxis_title="Time",
-        yaxis_title="Symbol",
+        yaxis_title="Instrument",
     )
     return figure
 
@@ -328,7 +356,7 @@ def _render_orders_table_section(
     except Exception:  # noqa: BLE001 - page must not crash
         filtered_df = df
 
-    render_table(filtered_df)
+    render_table(_style_by_status(filtered_df), height=420)
     if df.empty:
         st.caption(empty_caption)
     elif filtered_df.empty:
@@ -404,8 +432,15 @@ def render(ctx: DashboardRenderContext) -> None:
         ctx: Immutable render context with facade and session handles.
     """
     render_page_header("Orders", "Execution monitor (read-only)")
-    _render_orders_body(ctx)
-    st.caption("Order mutation not available in dashboard v1")
+
+    def _body() -> None:
+        _render_orders_body(ctx)
+        st.caption("Order mutation not available in dashboard v1")
+
+    if not ctx.config.enable_autorefresh:
+        _body()
+        return
+    live_fragment(_body, interval_seconds=ctx.config.refresh_interval_seconds, key="orders_refresh")
 
 
 __all__ = (

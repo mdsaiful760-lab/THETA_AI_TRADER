@@ -11,15 +11,26 @@ DASHBOARD_UI_SCHEMA_VERSION: str = "1.0.0"
 VALID_PAGE_IDS: frozenset[str] = frozenset(
     {
         "home",
-        "market",
-        "strategy_monitor",
-        "paper_trading",
-        "orders",
+        "market_regime",
+        "greeks",
+        "liquidity",
+        "volatility",
+        "option_chain",
+        "heatmap",
+        "scanner",
+        "builder",
+        "backtesting",
+        "library",
+        "risk_dashboard",
+        "position_sizing",
         "portfolio",
-        "risk",
-        "apme",
+        "exposure",
+        "trade_execution",
+        "orders",
+        "positions",
+        "trade_log",
+        "engine_status",
         "logs",
-        "analytics",
         "settings",
     }
 )
@@ -72,7 +83,7 @@ class DashboardUiConfig:
     app_title: str = "THETA AI TRADER"
     default_page: str = "home"
     refresh_interval_seconds: float = 2.0
-    enable_autorefresh: bool = False
+    enable_autorefresh: bool = True
     show_demo_banners: bool = True
     plotly_template: str = "plotly_dark"
     index_symbols: tuple[str, ...] = DEFAULT_INDEX_SYMBOLS

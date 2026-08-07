@@ -98,6 +98,8 @@ class MarketPageView:
         indices: Live index cards (NIFTY, BANKNIFTY, SENSEX, INDIA VIX).
         option_chain_columns: Option chain column headers.
         option_chain_rows: Option chain display rows.
+        atm_strike: At-the-money strike for the selected underlying, used
+            to highlight the corresponding option chain row.
     """
 
     underlyings: tuple[str, ...] = ()
@@ -114,10 +116,21 @@ class MarketPageView:
         "strike",
         "type",
         "ltp",
+        "bid",
+        "ask",
         "oi",
+        "oi_change",
+        "volume",
         "iv",
+        "delta",
+        "gamma",
+        "theta",
+        "vega",
     )
     option_chain_rows: tuple[tuple[str, ...], ...] = ()
+    atm_strike: str = PLACEHOLDER
+    nearest_expiry: str = PLACEHOLDER
+    ai_selected_strikes: tuple[str, ...] = ()
 
 
 def market_page_statistic_cards(view: MarketPageView) -> tuple[KpiCardModel, ...]:
@@ -148,6 +161,221 @@ def market_regime_cards(view: MarketPageView) -> tuple[KpiCardModel, ...]:
         Single-item KPI tuple for market regime.
     """
     return (KpiCardModel("Market Regime", view.market_regime),)
+
+
+@dataclass(frozen=True)
+class ChartMarkerView:
+    """Single real, timestamped chart annotation.
+
+    Attributes:
+        time: ISO-8601 timestamp of the real underlying event/candle.
+        price: Real price level to anchor the marker at.
+        label: Short display text.
+        kind: Marker category (``ai_signal``, ``entry``, ``exit``, ``sl``,
+            ``target``) — only categories backed by real data are emitted.
+        position: Marker placement relative to the bar (``above``/``below``).
+    """
+
+    time: str
+    price: float
+    label: str
+    kind: str
+    position: str = "above"
+
+
+@dataclass(frozen=True)
+class ChartPriceLineView:
+    """Single real horizontal price-line overlay (stop-loss / target).
+
+    Only emitted when the backing signal hint is an absolute
+    ``UNDERLYING_LEVEL`` value directly plottable on the underlying's own
+    price axis — never derived or estimated from a premium-based hint.
+
+    Attributes:
+        price: Real absolute underlying price level.
+        label: Short display text (e.g. ``"SL"`` / ``"Target"``).
+        kind: ``sl`` or ``target``.
+    """
+
+    price: float
+    label: str
+    kind: str
+
+
+@dataclass(frozen=True)
+class MarketChartView:
+    """Real OHLCV chart series for the Market page candlestick panel.
+
+    All series are derived exclusively from real fetched candles — EMA and
+    VWAP are standard arithmetic overlays computed over real closes/volumes,
+    never estimated or backfilled. Markers are emitted only when real,
+    already-computed backend data exists for that event.
+
+    Attributes:
+        underlying: Underlying symbol this series belongs to.
+        interval: Real candle granularity actually returned (e.g. ``5minute``).
+        candles: Real OHLCV rows as ``(iso_time, open, high, low, close, volume)``.
+        ema9: EMA(9) overlay as ``(iso_time, value)`` pairs.
+        ema20: EMA(20) overlay as ``(iso_time, value)`` pairs.
+        ema50: EMA(50) overlay as ``(iso_time, value)`` pairs.
+        vwap: Session VWAP overlay as ``(iso_time, value)`` pairs.
+        markers: Real, timestamped chart annotations.
+        source: Payload source (``live`` / ``offline`` / ``cached``).
+    """
+
+    underlying: str = PLACEHOLDER
+    interval: str = PLACEHOLDER
+    candles: tuple[tuple[str, float, float, float, float, int], ...] = ()
+    ema9: tuple[tuple[str, float], ...] = ()
+    ema20: tuple[tuple[str, float], ...] = ()
+    ema50: tuple[tuple[str, float], ...] = ()
+    vwap: tuple[tuple[str, float], ...] = ()
+    markers: tuple[ChartMarkerView, ...] = ()
+    price_lines: tuple[ChartPriceLineView, ...] = ()
+    source: str = "offline"
+
+
+@dataclass(frozen=True)
+class MetricCardView:
+    """One top-row analytics card (Market Regime / VIX / PCR / Max Pain / FII-DII).
+
+    Attributes:
+        label: Card title.
+        value: Primary real value display, or ``PLACEHOLDER`` when the
+            underlying data source does not exist on this platform.
+        caption: Short derived/classification caption for ``value``.
+        available: ``False`` when this metric has no real backing data
+            source at all (e.g. FII/DII flows) — the page must render an
+            honest "not available" state rather than a fabricated number.
+        trend: Sparkline series as plain floats (real historical readings
+            captured by the dashboard; empty when unavailable).
+    """
+
+    label: str
+    value: str = PLACEHOLDER
+    caption: str = PLACEHOLDER
+    available: bool = True
+    trend: tuple[float, ...] = ()
+
+
+@dataclass(frozen=True)
+class EngineStatusRow:
+    """One row in the Engine Status table.
+
+    Attributes:
+        name: Component/pipeline-stage display name.
+        state: Real 3-tier health classification — ``"healthy"``
+            (registered and producing real fresh data this cycle),
+            ``"degraded"`` (registered/connected but this cycle's data is
+            placeholder/stale/empty), or ``"down"`` (not registered / no
+            session). Never a fabricated tier.
+        latency_display: Real measured latency for this domain's dashboard
+            read (round-trip of the actual backend accessor call) —
+            ``PLACEHOLDER`` when the component is not registered.
+        heartbeat: Real timestamp of this health read (the same clock used
+            for the rest of this render), ``PLACEHOLDER`` when down.
+    """
+
+    name: str
+    state: str = "down"
+    latency_display: str = PLACEHOLDER
+    heartbeat: str = PLACEHOLDER
+
+    @property
+    def running(self) -> bool:
+        """Backward-compatible boolean view: healthy or degraded counts as up."""
+        return self.state in ("healthy", "degraded")
+
+
+@dataclass(frozen=True)
+class OiBuildupRow:
+    """One row in the Top OI Build-up table."""
+
+    strike: str = PLACEHOLDER
+    open_interest: str = PLACEHOLDER
+    change_percent: str = PLACEHOLDER
+    ltp: str = PLACEHOLDER
+    trend: str = PLACEHOLDER
+
+
+@dataclass(frozen=True)
+class ScannerRow:
+    """One row in the Strategy Scanner table.
+
+    ``expected_pop`` is real (relayed from the strategy evaluation
+    engine's own ``expected_pop`` when present). ``expected_roi`` and
+    ``expected_theta`` have no corresponding field anywhere in the
+    backend evaluation output — they stay ``PLACEHOLDER`` rather than
+    being fabricated.
+    """
+
+    strategy: str = PLACEHOLDER
+    score: str = PLACEHOLDER
+    signal: str = PLACEHOLDER
+    confidence: str = PLACEHOLDER
+    expected_pop: str = PLACEHOLDER
+    expected_roi: str = PLACEHOLDER
+    expected_theta: str = PLACEHOLDER
+    status: str = PLACEHOLDER
+
+
+@dataclass(frozen=True)
+class AlertRow:
+    """One row in the Recent Alerts feed — sourced from real structured logs.
+
+    ``category`` is a real classification of the log entry's own real
+    logger name (Market / AI / Broker / Execution / System) — never a
+    fabricated tag.
+    """
+
+    title: str = PLACEHOLDER
+    detail: str = PLACEHOLDER
+    timestamp: str = PLACEHOLDER
+    severity: str = "info"
+    category: str = "System"
+
+
+@dataclass(frozen=True)
+class DashboardOverviewView:
+    """Full Home / Dashboard Overview page snapshot.
+
+    Every field is either a real value composed from existing facade reads,
+    a transparent deterministic classification/derivation of a real value
+    (e.g. VIX magnitude -> Low/Moderate/High), or an explicit
+    ``available=False`` / ``PLACEHOLDER`` state when this platform has no
+    real data source for that concept (Market Breadth, FII/DII net flow —
+    both require market-wide feeds this system does not have).
+    """
+
+    selected_underlying: str = PLACEHOLDER
+    as_of: str = PLACEHOLDER
+    market_regime: MetricCardView = field(default_factory=lambda: MetricCardView("Market Regime"))
+    india_vix: MetricCardView = field(default_factory=lambda: MetricCardView("India VIX"))
+    put_call_ratio: MetricCardView = field(
+        default_factory=lambda: MetricCardView("Put Call Ratio")
+    )
+    max_pain: MetricCardView = field(default_factory=lambda: MetricCardView("Max Pain (Weekly)"))
+    fii_dii: MetricCardView = field(
+        default_factory=lambda: MetricCardView("FII / DII (Net)", available=False)
+    )
+    breadth_available: bool = False
+    breadth_advancing: int = 0
+    breadth_declining: int = 0
+    breadth_unchanged: int = 0
+    engines: tuple[EngineStatusRow, ...] = ()
+    engines_overall_health: str = PLACEHOLDER
+    oi_buildup_calls: tuple[OiBuildupRow, ...] = ()
+    oi_buildup_puts: tuple[OiBuildupRow, ...] = ()
+    volume_buildup_calls: tuple[OiBuildupRow, ...] = ()
+    volume_buildup_puts: tuple[OiBuildupRow, ...] = ()
+    atm_strike: str = PLACEHOLDER
+    atm_iv: str = PLACEHOLDER
+    nearest_expiry: str = PLACEHOLDER
+    scanner_rows: tuple[ScannerRow, ...] = ()
+    alerts: tuple[AlertRow, ...] = ()
+    broker_connected: bool = False
+    system_operational: bool = False
+    source: str = "offline"
 
 
 @dataclass(frozen=True)
@@ -286,6 +514,11 @@ class PaperPositionView:
     current: str = PLACEHOLDER
     mtm: str = PLACEHOLDER
     status: str = PLACEHOLDER
+    exposure: str = PLACEHOLDER
+    delta: str = PLACEHOLDER
+    gamma: str = PLACEHOLDER
+    theta: str = PLACEHOLDER
+    vega: str = PLACEHOLDER
 
 
 @dataclass(frozen=True)
@@ -316,6 +549,7 @@ class PaperTradingPageView:
     runner_latency: str = PLACEHOLDER
     runner_last_update: str = PLACEHOLDER
     source: str = "offline"
+    roi: str = PLACEHOLDER
 
 
 def paper_trading_kpi_cards(view: PaperTradingPageView) -> tuple[KpiCardModel, ...]:
@@ -325,7 +559,7 @@ def paper_trading_kpi_cards(view: PaperTradingPageView) -> tuple[KpiCardModel, .
         view: Paper trading page snapshot.
 
     Returns:
-        Six KPI cards in display order.
+        Seven KPI cards in display order.
     """
     cash = (
         view.available_cash
@@ -339,6 +573,7 @@ def paper_trading_kpi_cards(view: PaperTradingPageView) -> tuple[KpiCardModel, .
         KpiCardModel("Today's P&L", view.todays_pnl),
         KpiCardModel("Realized P&L", view.realized_pnl),
         KpiCardModel("Unrealized P&L", view.unrealized_pnl),
+        KpiCardModel("ROI", view.roi),
     )
 
 

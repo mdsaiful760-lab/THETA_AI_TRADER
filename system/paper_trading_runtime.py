@@ -339,6 +339,7 @@ class PaperTradingRuntime:
                 paper_runner=self.paper_trading_runner,
                 evaluation_bundle_provider=self._decision_loop.get_latest_bundle,
                 market_regime_provider=self._latest_regime,
+                ai_decision_loop=self._decision_loop,
             )
         )
 

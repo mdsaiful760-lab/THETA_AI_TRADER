@@ -14,6 +14,9 @@ venv/
 # Environment Variables
 .env
 
+# Persisted broker sessions (real access tokens)
+data/
+
 # VS Code
 .vscode/
 

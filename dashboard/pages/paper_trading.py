@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 from typing import Any, Sequence
 
 import pandas as pd
@@ -15,7 +14,7 @@ from dashboard.components.kpi_cards import render_kpi_row
 from dashboard.components.page_header import render_page_header
 from dashboard.components.plotly_charts import build_drawdown, build_equity_curve
 from dashboard.facade import NullIntegrationFacade
-from dashboard.utils.polling import paper_trading_refresh_interval_ms
+from dashboard.utils.autorefresh import live_fragment
 from dashboard.view_models import (
     DashboardRenderContext,
     KpiCardModel,
@@ -34,6 +33,7 @@ _POSITION_COLUMNS: tuple[str, ...] = (
     "Entry",
     "Current",
     "MTM",
+    "Exposure",
     "Status",
 )
 
@@ -158,6 +158,27 @@ def _account_summary_cards(view: PaperTradingPageView) -> tuple[KpiCardModel, ..
     )
 
 
+def _terminal_summary_cards(view: PaperTradingPageView) -> tuple[KpiCardModel, ...]:
+    """Build the trading-terminal top row: Capital/Available/Used Margin/PnL/ROI.
+
+    Args:
+        view: Paper trading page snapshot.
+
+    Returns:
+        Five KPI cards in the terminal's above-the-fold display order.
+    """
+    available_margin = (
+        view.available_cash if view.available_cash != PLACEHOLDER else view.virtual_cash
+    )
+    return (
+        KpiCardModel("Capital", view.total_equity),
+        KpiCardModel("Available Margin", available_margin),
+        KpiCardModel("Used Margin", view.capital_used),
+        KpiCardModel("Today's PnL", view.todays_pnl),
+        KpiCardModel("ROI", view.roi),
+    )
+
+
 def _positions_frame(view: PaperTradingPageView) -> pd.DataFrame:
     """Build the open positions DataFrame.
 
@@ -181,6 +202,7 @@ def _positions_frame(view: PaperTradingPageView) -> pd.DataFrame:
                     _attr(row, "current", "mark", default=PLACEHOLDER)
                 ),
                 "MTM": _display(_attr(row, "mtm", "pnl", default=PLACEHOLDER)),
+                "Exposure": _display(_attr(row, "exposure", default=PLACEHOLDER)),
                 "Status": _display(_attr(row, "status", default=PLACEHOLDER)),
             }
         )
@@ -639,8 +661,10 @@ def _render_paper_body(ctx: DashboardRenderContext) -> None:
     snapshot = _resolve_paper_view(ctx)
     analytics = _resolve_analytics(ctx.facade)
 
-    st.subheader("Paper account summary")
-    render_kpi_row(_account_summary_cards(snapshot))
+    # Trading-terminal layout: Capital/Margin/PnL/ROI up top, open positions
+    # in the middle, execution timeline at the bottom — the primary
+    # above-the-fold view. Richer supplementary analytics follow beneath.
+    render_kpi_row(_terminal_summary_cards(snapshot))
     if _is_empty_account(snapshot):
         st.info("Empty paper portfolio — awaiting backend ledger")
 
@@ -689,10 +713,7 @@ def _render_paper_body(ctx: DashboardRenderContext) -> None:
 
 
 def _enable_paper_trading_autorefresh(ctx: DashboardRenderContext) -> None:
-    """Enable Paper Trading autorefresh without trading cycles.
-
-    Prefers ``streamlit-autorefresh`` for a full-script rerun. Falls back to a
-    Streamlit ``fragment(run_every=...)`` that re-renders only the page body.
+    """Live-refresh the Paper Trading body in place — never the whole page.
 
     Args:
         ctx: Immutable render context with facade and config.
@@ -700,37 +721,10 @@ def _enable_paper_trading_autorefresh(ctx: DashboardRenderContext) -> None:
     if not ctx.config.enable_paper_trading_autorefresh:
         _render_paper_body(ctx)
         return
-
-    interval_ms = paper_trading_refresh_interval_ms(ctx.config)
-    try:
-        from streamlit_autorefresh import st_autorefresh
-
-        st_autorefresh(interval=interval_ms, key="paper_trading_refresh")
-        _render_paper_body(ctx)
-        return
-    except Exception:  # noqa: BLE001 - optional dependency
-        pass
-
-    fragment = getattr(st, "fragment", None)
-    if fragment is not None:
-        seconds = float(ctx.config.paper_trading_refresh_seconds)
-
-        @fragment(run_every=timedelta(seconds=seconds))
-        def _paper_trading_fragment() -> None:
-            """Re-render Paper Trading body on the refresh interval."""
-            _render_paper_body(ctx)
-
-        _paper_trading_fragment()
-        return
-
-    _logger.warning(
-        "Paper Trading autorefresh unavailable; install streamlit-autorefresh "
-        "or use Streamlit >= 1.33 for fragment refresh"
-    )
-    _render_paper_body(ctx)
-    st.caption(
-        f"Paper trading refresh interval: {ctx.config.paper_trading_refresh_seconds:.1f}s "
-        "(install streamlit-autorefresh for automatic refresh)"
+    live_fragment(
+        lambda: _render_paper_body(ctx),
+        interval_seconds=ctx.config.paper_trading_refresh_seconds,
+        key="paper_trading_refresh",
     )
 
 
@@ -745,7 +739,7 @@ def render(ctx: DashboardRenderContext) -> None:
     Args:
         ctx: Immutable render context with facade and session handles.
     """
-    render_page_header("Paper Trading", "Virtual ledger (read-only)")
+    render_page_header("Trade Execution", "Virtual paper-trading ledger (read-only)")
     _enable_paper_trading_autorefresh(ctx)
 
 
@@ -753,6 +747,7 @@ __all__ = (
     "render",
     "_resolve_paper_view",
     "_account_summary_cards",
+    "_terminal_summary_cards",
     "_positions_frame",
     "_orders_frame",
     "_execution_timeline_frame",

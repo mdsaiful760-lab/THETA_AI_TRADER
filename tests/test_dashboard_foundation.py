@@ -27,7 +27,9 @@ from dashboard.view_models import home_kpi_cards
 def _mock_streamlit() -> MagicMock:
     """Build a lightweight Streamlit mock with common widget stubs."""
     mock_st = MagicMock()
-    mock_st.columns.side_effect = lambda n: [MagicMock() for _ in range(n)]
+    mock_st.columns.side_effect = (
+        lambda n, **kwargs: [MagicMock() for _ in range(n if isinstance(n, int) else len(n))]
+    )
     mock_st.expander.return_value.__enter__ = MagicMock(return_value=None)
     mock_st.expander.return_value.__exit__ = MagicMock(return_value=None)
     mock_st.selectbox.side_effect = lambda *args, **kwargs: kwargs.get("options", ["All"])[0]
@@ -117,21 +119,32 @@ class TestDashboardUiConfig:
 class TestPageRegistry:
     """T02/T04: Page registry completeness and sidebar alignment."""
 
-    def test_registry_has_eleven_pages(self) -> None:
-        assert len(PAGE_REGISTRY) == 11
+    def test_registry_has_twenty_two_pages(self) -> None:
+        assert len(PAGE_REGISTRY) == 22
 
     def test_registry_page_ids(self) -> None:
         expected = {
             "home",
-            "market",
-            "strategy_monitor",
-            "paper_trading",
-            "orders",
+            "market_regime",
+            "greeks",
+            "liquidity",
+            "volatility",
+            "option_chain",
+            "heatmap",
+            "scanner",
+            "builder",
+            "backtesting",
+            "library",
+            "risk_dashboard",
+            "position_sizing",
             "portfolio",
-            "risk",
-            "apme",
+            "exposure",
+            "trade_execution",
+            "orders",
+            "positions",
+            "trade_log",
+            "engine_status",
             "logs",
-            "analytics",
             "settings",
         }
         assert set(PAGE_REGISTRY) == expected

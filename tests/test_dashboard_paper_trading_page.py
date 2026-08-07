@@ -124,6 +124,7 @@ class TestOfflinePlaceholders:
             "Entry",
             "Current",
             "MTM",
+            "Exposure",
             "Status",
         ]
         assert positions.empty
@@ -170,7 +171,6 @@ class TestOfflinePlaceholders:
                         assert kpi.call_count >= 5
                         assert table.call_count == 3
             for title in (
-                "Paper account summary",
                 "Open Positions",
                 "Execution timeline",
                 "Performance KPIs",

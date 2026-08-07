@@ -287,3 +287,249 @@ class TestConcurrencyAndRegistration:
         clear_live_handles()
         offline = build_default_presentation_facade()
         assert offline.is_connected is False
+
+
+def _contract(
+    *,
+    tradingsymbol: str,
+    strike: float,
+    option_type: str,
+    ltp: float,
+    bid: float,
+    ask: float,
+    open_interest: int,
+    volume: int,
+    delta: float,
+    gamma: float,
+    theta: float,
+    vega: float,
+    iv: float,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        tradingsymbol=tradingsymbol,
+        strike=strike,
+        option_type=SimpleNamespace(value=option_type),
+        ltp=ltp,
+        bid=bid,
+        ask=ask,
+        open_interest=open_interest,
+        volume=volume,
+        delta=delta,
+        gamma=gamma,
+        theta=theta,
+        vega=vega,
+        iv=iv,
+    )
+
+
+def _streaming_stub_with_option_chain(open_interest: int = 12_000) -> MagicMock:
+    """Build a streaming stub whose NIFTY snapshot carries real option contracts."""
+    contracts = (
+        _contract(
+            tradingsymbol="NIFTY24500CE", strike=24500.0, option_type="CE",
+            ltp=142.5, bid=142.0, ask=143.0, open_interest=open_interest,
+            volume=50_000, delta=0.52, gamma=0.002, theta=-8.1, vega=12.4, iv=14.8,
+        ),
+        _contract(
+            tradingsymbol="NIFTY24500PE", strike=24500.0, option_type="PE",
+            ltp=118.2, bid=117.5, ask=118.8, open_interest=open_interest + 500,
+            volume=42_000, delta=-0.48, gamma=0.002, theta=-7.6, vega=12.1, iv=15.1,
+        ),
+    )
+    nifty = SimpleNamespace(
+        underlying=_underlying("NIFTY", last_price=24512.4, change=85.2, change_percent=0.35),
+        volatility=None,
+        option_chain=SimpleNamespace(
+            contracts=contracts,
+            metadata=SimpleNamespace(atm_strike=24500.0),
+        ),
+    )
+    streaming = MagicMock()
+    streaming.get_snapshot.side_effect = lambda symbol: nifty if symbol == "NIFTY" else None
+    streaming.get_health.return_value = SimpleNamespace(status="healthy")
+    return streaming
+
+
+class TestOptionChainWithGreeks:
+    """Real per-contract Greeks/OI reach the Market page, never fabricated."""
+
+    def test_option_chain_rows_carry_real_greeks_and_oi(self) -> None:
+        adapter = DashboardLiveSessionAdapter(
+            DashboardLiveHandles(market_streaming=_streaming_stub_with_option_chain())
+        )
+
+        snap = adapter.get_market_snapshot()
+
+        assert snap.atm_strike == "24500.0"
+        assert len(snap.option_chain_rows) == 2
+        by_symbol = {}
+        for row in snap.option_chain_rows:
+            values = dict(zip(snap.option_chain_columns, row))
+            by_symbol[values["type"]] = values
+        assert by_symbol["CE"]["delta"] == "0.52"
+        assert by_symbol["CE"]["iv"] == "14.8"
+        assert by_symbol["PE"]["gamma"] == "0.002"
+        assert by_symbol["CE"]["bid"] == "142.0"
+        assert by_symbol["CE"]["ask"] == "143.0"
+        # First observation: no prior OI to diff against yet.
+        assert by_symbol["CE"]["oi_change"] == PLACEHOLDER
+
+    def test_oi_change_diffs_two_real_polls_never_fabricated(self) -> None:
+        adapter = DashboardLiveSessionAdapter(
+            DashboardLiveHandles(market_streaming=_streaming_stub_with_option_chain(open_interest=10_000))
+        )
+        adapter.get_market_snapshot()  # first poll seeds the baseline
+
+        adapter._handles.market_streaming = _streaming_stub_with_option_chain(open_interest=10_750)
+        snap = adapter.get_market_snapshot()
+
+        values = {
+            dict(zip(snap.option_chain_columns, row))["type"]: dict(zip(snap.option_chain_columns, row))
+            for row in snap.option_chain_rows
+        }
+        assert values["CE"]["oi_change"] == "750"
+
+
+class TestAiPanel:
+    """AI reasoning/countdown are read-only soft-reads off AIDecisionLoop."""
+
+    def test_returns_none_without_a_decision_loop_handle(self) -> None:
+        adapter = DashboardLiveSessionAdapter(DashboardLiveHandles())
+        assert adapter.get_ai_panel() is None
+
+    def test_surfaces_real_reasons_and_computes_countdown_from_real_timing(self) -> None:
+        decision = SimpleNamespace(
+            reasons=("setup meets short strangle criteria", "confidence above threshold"),
+            sizing_reason=None,
+            decision_status="selected",
+            risk_verdict="approved",
+            strategy_id="short_strangle",
+        )
+        loop = MagicMock()
+        loop.get_latest_decision.return_value = decision
+        loop.get_health.return_value = SimpleNamespace(last_cycle_at=FIXED_NOW)
+        loop.config = SimpleNamespace(interval_seconds=5.0)
+
+        adapter = DashboardLiveSessionAdapter(
+            DashboardLiveHandles(ai_decision_loop=loop), clock=lambda: FIXED_NOW
+        )
+        panel = adapter.get_ai_panel()
+
+        assert panel is not None
+        assert panel.reasons == decision.reasons
+        assert panel.strategy_id == "short_strangle"
+        # Same instant as last_cycle_at -> full interval remains.
+        assert panel.next_evaluation_display == "5s"
+
+    def test_returns_none_when_no_decision_has_run_yet(self) -> None:
+        loop = MagicMock()
+        loop.get_latest_decision.return_value = None
+        adapter = DashboardLiveSessionAdapter(DashboardLiveHandles(ai_decision_loop=loop))
+
+        assert adapter.get_ai_panel() is None
+
+
+class TestUnderlyingCandles:
+    """The chart's candle fetch reuses the already-connected market data
+    engine's own broker link — never a new broker connection."""
+
+    def test_delegates_to_streaming_engine_with_real_request_shape(self) -> None:
+        engine = MagicMock()
+        engine.fetch_historical_candles.return_value = SimpleNamespace(
+            candles=(
+                {
+                    "date": FIXED_NOW,
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.5,
+                    "volume": 1000,
+                },
+            )
+        )
+        adapter = DashboardLiveSessionAdapter(
+            DashboardLiveHandles(market_streaming=engine), clock=lambda: FIXED_NOW
+        )
+
+        result = adapter.get_underlying_candles("NIFTY")
+
+        assert result is not None
+        assert result.underlying == "NIFTY"
+        assert len(result.candles) == 1
+        request = engine.fetch_historical_candles.call_args.args[0]
+        assert request.instrument_key == "NSE:NIFTY 50"
+        assert request.interval == "5minute"
+        assert request.to_ts == FIXED_NOW
+        assert request.from_ts < FIXED_NOW
+
+    def test_returns_none_for_unrecognized_underlying(self) -> None:
+        adapter = DashboardLiveSessionAdapter(
+            DashboardLiveHandles(market_streaming=MagicMock())
+        )
+        assert adapter.get_underlying_candles("DOWJONES") is None
+
+    def test_returns_none_without_streaming_handle(self) -> None:
+        adapter = DashboardLiveSessionAdapter(DashboardLiveHandles())
+        assert adapter.get_underlying_candles("NIFTY") is None
+
+    def test_returns_none_when_fetch_raises(self) -> None:
+        engine = MagicMock()
+        engine.fetch_historical_candles.side_effect = RuntimeError("broker timeout")
+        adapter = DashboardLiveSessionAdapter(DashboardLiveHandles(market_streaming=engine))
+        assert adapter.get_underlying_candles("NIFTY") is None
+
+
+def _paper_runner_stub(*, cash: str, unrealized: str, starting_cash: str = "1000000.00") -> MagicMock:
+    from decimal import Decimal
+
+    runner = MagicMock()
+    runner.get_capital_snapshot.return_value = SimpleNamespace(
+        cash=Decimal(cash), starting_cash=Decimal(starting_cash)
+    )
+    runner.get_portfolio_view.return_value = SimpleNamespace(
+        capital=SimpleNamespace(cash=Decimal(cash)),
+        positions=SimpleNamespace(positions=()),
+        total_realized_pnl=Decimal("0.00"),
+        total_unrealized_pnl=Decimal(unrealized),
+        gross_notional=Decimal("0.00"),
+    )
+    runner.get_position_book.return_value = SimpleNamespace(positions=())
+    return runner
+
+
+class TestEquityCurveAndRoi:
+    """The paper ledger has no history of its own — the dashboard captures
+    one real equity reading per poll and derives equity/drawdown/ROI from
+    only those real, observed values."""
+
+    def test_first_poll_seeds_a_single_real_equity_point(self) -> None:
+        adapter = DashboardLiveSessionAdapter(
+            DashboardLiveHandles(
+                paper_runner=_paper_runner_stub(cash="1000000.00", unrealized="0.00")
+            ),
+            clock=lambda: FIXED_NOW,
+        )
+
+        snap = adapter.get_paper_trading_snapshot()
+
+        assert len(snap.equity_series) == 1
+        assert snap.equity_series[0][1] == 1000000.0
+        assert snap.total_equity == 1000000.0
+        assert snap.roi == 0.0
+
+    def test_second_poll_appends_and_roi_reflects_real_pnl(self) -> None:
+        times = iter([FIXED_NOW, FIXED_NOW.replace(minute=31)])
+        handles = DashboardLiveHandles(
+            paper_runner=_paper_runner_stub(cash="1000000.00", unrealized="0.00")
+        )
+        adapter = DashboardLiveSessionAdapter(handles, clock=lambda: next(times))
+        adapter.get_paper_trading_snapshot()
+
+        handles.paper_runner = _paper_runner_stub(cash="1004000.00", unrealized="500.00")
+        snap = adapter.get_paper_trading_snapshot()
+
+        assert len(snap.equity_series) == 2
+        assert snap.total_equity == 1004500.0
+        assert snap.roi == pytest.approx(0.45, rel=1e-3)
+        # Equity only rose -> no drawdown yet.
+        assert snap.drawdown_series[-1][1] == 0.0
