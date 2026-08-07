@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -29,9 +30,16 @@ from broker.kite_websocket import (
     SubscriptionManager,
     TOPIC_CONNECTION,
     TOPIC_SUBSCRIPTION,
+    UnderlyingStreamStats,
     UnderlyingSupportTier,
     WebSocketConnectionStatus,
+    WebSocketDashboardConnectionSnapshot,
+    WebSocketHealthIssue,
+    WebSocketHealthReport,
     WebSocketHealthStatus,
+    WebSocketStatistics,
+    build_dashboard_connection_snapshot,
+    classify_dashboard_index_status,
     classify_underlying_tier,
     default_kite_websocket_config,
     deserialize_websocket_health_report,
@@ -150,6 +158,7 @@ def make_client(
             "fail_closed_on_empty_instruments", False
         ),
         per_underlying_silence_seconds=kwargs.pop("per_underlying_silence_seconds", 5.0),
+        heartbeat_silence_seconds=kwargs.pop("heartbeat_silence_seconds", 5.0),
         allow_experimental_underlyings=kwargs.pop("allow_experimental_underlyings", False),
         runner_kind="test",
     )
@@ -834,3 +843,434 @@ class TestCoverageGaps:
             fail_closed_on_empty_instruments=False,
         )
         assert config.fail_closed_on_empty_instruments is True
+
+
+class TestReconnect:
+    """Explicit reconnect(): active teardown/reconnect distinct from SDK auto-reconnect."""
+
+    def test_reconnect_reestablishes_connection(self) -> None:
+        client, fake = make_client()
+        client.set_instruments((make_instrument(11, "NIFTY"),))
+        client.connect()
+        client.apply_subscriptions()
+        client.reconnect()
+        assert client.get_status() is WebSocketConnectionStatus.CONNECTED
+        assert fake.connected is True
+
+    def test_reconnect_reapplies_desired_subscriptions(self) -> None:
+        client, fake = make_client()
+        client.set_instruments((make_instrument(11, "NIFTY"),))
+        client.connect()
+        client.apply_subscriptions()
+        assert fake.subscribed == {11}
+        client.reconnect()
+        assert fake.subscribed == {11}
+
+    def test_reconnect_increments_reconnect_count(self) -> None:
+        client, _ = make_client()
+        client.connect()
+        assert client.get_statistics().reconnect_count == 0
+        client.reconnect()
+        client.reconnect()
+        assert client.get_statistics().reconnect_count == 2
+
+    def test_reconnect_from_disconnected_state(self) -> None:
+        client, _ = make_client()
+        client.reconnect()
+        assert client.get_status() is WebSocketConnectionStatus.CONNECTED
+        assert client.get_statistics().reconnect_count == 1
+
+
+class TestHeartbeatMonitor:
+    """check_heartbeat() and the background heartbeat monitor thread."""
+
+    def _mutable_clock(self) -> tuple[list[datetime], Any]:
+        times = [FIXED_NOW]
+
+        def clock() -> datetime:
+            return times[0]
+
+        return times, clock
+
+    def test_check_heartbeat_healthy_with_recent_tick(self) -> None:
+        times, clock = self._mutable_clock()
+        client, fake = make_client(clock=clock, underlyings=("NIFTY",))
+        client.set_instruments((make_instrument(11, "NIFTY"),))
+        client.connect()
+        client.apply_subscriptions()
+        fake.emit_ticks([{"instrument_token": 11, "last_price": 1.0}])
+        assert client.check_heartbeat() is True
+
+    def test_check_heartbeat_stale_after_silence_exceeds_threshold(self) -> None:
+        times, clock = self._mutable_clock()
+        client, fake = make_client(
+            clock=clock,
+            underlyings=("NIFTY",),
+            heartbeat_silence_seconds=5.0,
+        )
+        client.set_instruments((make_instrument(11, "NIFTY"),))
+        client.connect()
+        client.apply_subscriptions()
+        fake.emit_ticks([{"instrument_token": 11, "last_price": 1.0}])
+        times[0] = FIXED_NOW + timedelta(seconds=10)
+        assert client.check_heartbeat() is False
+
+    def test_check_heartbeat_true_when_never_ticked(self) -> None:
+        client, _ = make_client()
+        client.connect()
+        assert client.check_heartbeat() is True
+
+    def test_check_heartbeat_true_when_disconnected(self) -> None:
+        client, _ = make_client(heartbeat_silence_seconds=0.0)
+        assert client.get_status() is WebSocketConnectionStatus.DISCONNECTED
+        assert client.check_heartbeat() is True
+
+    def test_start_heartbeat_monitor_invalid_interval(self) -> None:
+        client, _ = make_client()
+        with pytest.raises(KiteWebSocketConfigurationError):
+            client.start_heartbeat_monitor(interval_seconds=0.0)
+
+    def test_start_heartbeat_monitor_calls_on_stale_when_stale(self) -> None:
+        client, fake = make_client(heartbeat_silence_seconds=0.0)
+        client.set_instruments((make_instrument(11, "NIFTY"),))
+        client.connect()
+        client.apply_subscriptions()
+        fake.emit_ticks([{"instrument_token": 11, "last_price": 1.0}])
+        fired = threading.Event()
+        client.start_heartbeat_monitor(interval_seconds=0.01, on_stale=fired.set)
+        try:
+            assert fired.wait(timeout=2.0)
+        finally:
+            client.stop_heartbeat_monitor()
+
+    def test_start_heartbeat_monitor_does_not_fire_when_healthy(self) -> None:
+        client, fake = make_client(heartbeat_silence_seconds=30.0)
+        client.set_instruments((make_instrument(11, "NIFTY"),))
+        client.connect()
+        client.apply_subscriptions()
+        fake.emit_ticks([{"instrument_token": 11, "last_price": 1.0}])
+        fired = threading.Event()
+        client.start_heartbeat_monitor(interval_seconds=0.01, on_stale=fired.set)
+        try:
+            assert fired.wait(timeout=0.1) is False
+        finally:
+            client.stop_heartbeat_monitor()
+
+    def test_start_heartbeat_monitor_idempotent(self) -> None:
+        client, _ = make_client(heartbeat_silence_seconds=30.0)
+        client.connect()
+        client.start_heartbeat_monitor(interval_seconds=0.05)
+        first_thread = client._heartbeat_thread
+        client.start_heartbeat_monitor(interval_seconds=0.05)
+        second_thread = client._heartbeat_thread
+        assert first_thread is second_thread
+        client.stop_heartbeat_monitor()
+
+    def test_stop_heartbeat_monitor_safe_when_never_started(self) -> None:
+        client, _ = make_client()
+        client.stop_heartbeat_monitor()
+
+    def test_default_on_stale_triggers_reconnect(self) -> None:
+        client, fake = make_client(heartbeat_silence_seconds=0.0)
+        client.set_instruments((make_instrument(11, "NIFTY"),))
+        client.connect()
+        client.apply_subscriptions()
+        fake.emit_ticks([{"instrument_token": 11, "last_price": 1.0}])
+        calls: list[int] = []
+        original_reconnect = client.reconnect
+
+        def spy() -> None:
+            calls.append(1)
+            original_reconnect()
+
+        client.reconnect = spy  # type: ignore[method-assign]
+        client.start_heartbeat_monitor(interval_seconds=0.01)
+        try:
+            deadline = time.time() + 2.0
+            while not calls and time.time() < deadline:
+                time.sleep(0.01)
+        finally:
+            client.stop_heartbeat_monitor()
+        assert calls
+
+
+class TestDynamicSubscribe:
+    """add_instruments() / remove_instruments(): client-facing dynamic subscribe."""
+
+    def test_add_instruments_while_connected_applies_immediately(self) -> None:
+        client, fake = make_client()
+        client.connect()
+        event = client.add_instruments((make_instrument(11, "NIFTY"),))
+        assert event is not None
+        assert event.subscribed_tokens == (11,)
+        assert fake.subscribed == {11}
+
+    def test_add_instruments_while_disconnected_only_updates_desired(self) -> None:
+        client, fake = make_client()
+        result = client.add_instruments((make_instrument(11, "NIFTY"),))
+        assert result is None
+        assert fake.subscribed == set()
+        assert any(i.instrument_token == 11 for i in client._subscriptions.desired())
+
+    def test_remove_instruments_while_connected_applies_immediately(self) -> None:
+        client, fake = make_client()
+        client.connect()
+        client.add_instruments((make_instrument(11, "NIFTY"),))
+        event = client.remove_instruments([11])
+        assert event is not None
+        assert event.unsubscribed_tokens == (11,)
+        assert fake.subscribed == set()
+
+    def test_remove_instruments_while_disconnected_only_updates_desired(self) -> None:
+        client, _ = make_client()
+        client.set_instruments((make_instrument(11, "NIFTY"),))
+        result = client.remove_instruments([11])
+        assert result is None
+        assert client._subscriptions.desired() == ()
+
+    def test_add_instruments_merges_with_existing_desired_set(self) -> None:
+        client, fake = make_client()
+        client.set_instruments((make_instrument(11, "NIFTY"),))
+        client.connect()
+        client.apply_subscriptions()
+        client.add_instruments((make_instrument(22, "BANKNIFTY"),))
+        assert fake.subscribed == {11, 22}
+
+
+class TestGracefulShutdown:
+    """shutdown(): stops the heartbeat monitor and closes the connection cleanly."""
+
+    def test_shutdown_stops_monitor_and_disconnects(self) -> None:
+        client, fake = make_client(heartbeat_silence_seconds=30.0)
+        client.set_instruments((make_instrument(11, "NIFTY"),))
+        client.connect()
+        client.apply_subscriptions()
+        client.start_heartbeat_monitor(interval_seconds=0.05)
+        client.shutdown()
+        assert client.get_status() is WebSocketConnectionStatus.CLOSED
+        assert fake.connected is False
+        assert client._heartbeat_thread is None
+
+    def test_shutdown_clears_handlers(self) -> None:
+        client, _ = make_client()
+        client.set_tick_handler(lambda tick: None)
+        client.set_error_handler(lambda event: None)
+        client.set_connection_handler(lambda event: None)
+        client.connect()
+        client.shutdown()
+        assert client._tick_handler is None
+        assert client._error_handler is None
+        assert client._connection_handler is None
+
+    def test_shutdown_safe_when_never_connected(self) -> None:
+        client, _ = make_client()
+        client.shutdown()
+        assert client.get_status() is WebSocketConnectionStatus.DISCONNECTED
+
+    def test_shutdown_idempotent(self) -> None:
+        client, _ = make_client()
+        client.connect()
+        client.shutdown()
+        client.shutdown()
+        assert client.get_status() is WebSocketConnectionStatus.CLOSED
+
+
+class TestDashboardIntegration:
+    """Dashboard connection-status mapping for the WebSocket manager."""
+
+    def _health_report(
+        self,
+        status: WebSocketConnectionStatus,
+        *,
+        issues: tuple[WebSocketHealthIssue, ...] = (),
+    ) -> WebSocketHealthReport:
+        stats = WebSocketStatistics(
+            as_of=FIXED_NOW,
+            connection_status=status,
+            total_desired_instruments=1,
+            total_active_instruments=1 if status is WebSocketConnectionStatus.CONNECTED else 0,
+            total_tick_count=0,
+            last_tick_at=None,
+            reconnect_count=0,
+            handler_error_count=0,
+            enabled_underlyings=("NIFTY",),
+            per_underlying=(),
+        )
+        return WebSocketHealthReport(
+            report_id="r1",
+            as_of=FIXED_NOW,
+            overall_health=WebSocketHealthStatus.HEALTHY,
+            connection_status=status,
+            enabled_underlyings=("NIFTY",),
+            healthy_underlyings=(),
+            degraded_underlyings=(),
+            unhealthy_underlyings=(),
+            active_subscription_count=stats.total_active_instruments,
+            issues=issues,
+            statistics=stats,
+        )
+
+    def test_build_dashboard_connection_snapshot_connected(self) -> None:
+        report = self._health_report(WebSocketConnectionStatus.CONNECTED)
+        snapshot = build_dashboard_connection_snapshot(report)
+        assert isinstance(snapshot, WebSocketDashboardConnectionSnapshot)
+        assert snapshot.state == "connected"
+        assert snapshot.connected is True
+
+    def test_build_dashboard_connection_snapshot_disconnected(self) -> None:
+        report = self._health_report(WebSocketConnectionStatus.DISCONNECTED)
+        snapshot = build_dashboard_connection_snapshot(report)
+        assert snapshot.state == "disconnected"
+        assert snapshot.connected is False
+
+    def test_build_dashboard_connection_snapshot_reconnecting(self) -> None:
+        report = self._health_report(WebSocketConnectionStatus.RECONNECTING)
+        snapshot = build_dashboard_connection_snapshot(report)
+        assert snapshot.state == "reconnecting"
+        assert snapshot.connected is False
+
+    def test_build_dashboard_connection_snapshot_uses_issue_message(self) -> None:
+        issue = WebSocketHealthIssue(
+            issue_code="KITE_WS.HEALTH.UNDERLYING_SILENT",
+            severity="warning",
+            message="Underlying NIFTY is silent.",
+            underlying="NIFTY",
+        )
+        report = self._health_report(
+            WebSocketConnectionStatus.CONNECTED, issues=(issue,)
+        )
+        snapshot = build_dashboard_connection_snapshot(report)
+        assert snapshot.message == "Underlying NIFTY is silent."
+
+    def test_classify_dashboard_index_status_offline_when_unsubscribed(self) -> None:
+        config = default_kite_websocket_config(enabled_underlyings=("NIFTY",))
+        entry = UnderlyingStreamStats(
+            underlying="NIFTY",
+            support_tier=UnderlyingSupportTier.PRIMARY,
+            desired_instrument_count=1,
+            active_instrument_count=0,
+            tick_count=0,
+            last_tick_at=None,
+            seconds_since_last_tick=None,
+            subscribe_success_count=0,
+            subscribe_failure_count=0,
+            error_count=0,
+        )
+        assert classify_dashboard_index_status(entry, config) == "OFFLINE"
+
+    def test_classify_dashboard_index_status_unknown_before_first_tick(self) -> None:
+        config = default_kite_websocket_config(enabled_underlyings=("NIFTY",))
+        entry = UnderlyingStreamStats(
+            underlying="NIFTY",
+            support_tier=UnderlyingSupportTier.PRIMARY,
+            desired_instrument_count=1,
+            active_instrument_count=1,
+            tick_count=0,
+            last_tick_at=None,
+            seconds_since_last_tick=None,
+            subscribe_success_count=1,
+            subscribe_failure_count=0,
+            error_count=0,
+        )
+        assert classify_dashboard_index_status(entry, config) == "UNKNOWN"
+
+    def test_classify_dashboard_index_status_live_within_threshold(self) -> None:
+        config = KiteWebSocketConfig(
+            enabled_underlyings=("NIFTY",), per_underlying_silence_seconds=5.0
+        )
+        entry = UnderlyingStreamStats(
+            underlying="NIFTY",
+            support_tier=UnderlyingSupportTier.PRIMARY,
+            desired_instrument_count=1,
+            active_instrument_count=1,
+            tick_count=5,
+            last_tick_at=FIXED_NOW,
+            seconds_since_last_tick=1.0,
+            subscribe_success_count=1,
+            subscribe_failure_count=0,
+            error_count=0,
+        )
+        assert classify_dashboard_index_status(entry, config) == "LIVE"
+
+    def test_classify_dashboard_index_status_delayed_past_threshold(self) -> None:
+        config = KiteWebSocketConfig(
+            enabled_underlyings=("NIFTY",), per_underlying_silence_seconds=5.0
+        )
+        entry = UnderlyingStreamStats(
+            underlying="NIFTY",
+            support_tier=UnderlyingSupportTier.PRIMARY,
+            desired_instrument_count=1,
+            active_instrument_count=1,
+            tick_count=5,
+            last_tick_at=FIXED_NOW,
+            seconds_since_last_tick=9.0,
+            subscribe_success_count=1,
+            subscribe_failure_count=0,
+            error_count=0,
+        )
+        assert classify_dashboard_index_status(entry, config) == "DELAYED"
+
+    def test_client_get_dashboard_connection_snapshot(self) -> None:
+        client, _ = make_client()
+        client.connect()
+        snapshot = client.get_dashboard_connection_snapshot()
+        assert snapshot.state == "connected"
+        assert snapshot.connected is True
+
+    def test_client_get_dashboard_index_connection_statuses(self) -> None:
+        client, fake = make_client(underlyings=("NIFTY", "BANKNIFTY"))
+        client.set_instruments(
+            (make_instrument(11, "NIFTY"), make_instrument(22, "BANKNIFTY"))
+        )
+        client.connect()
+        client.apply_subscriptions()
+        fake.emit_ticks([{"instrument_token": 11, "last_price": 1.0}])
+        statuses = client.get_dashboard_index_connection_statuses()
+        assert statuses["NIFTY"] == "LIVE"
+        assert statuses["BANKNIFTY"] == "UNKNOWN"
+
+
+class TestThreadSafeDynamicSubscribe:
+    """Concurrent ticks + dynamic subscribe/unsubscribe stay thread-safe."""
+
+    def test_concurrent_add_remove_and_ticks(self) -> None:
+        client, fake = make_client(underlyings=("NIFTY", "BANKNIFTY"))
+        client.connect()
+        barrier = threading.Barrier(3)
+        errors: list[BaseException] = []
+
+        def subscriber() -> None:
+            try:
+                barrier.wait()
+                for i in range(20):
+                    client.add_instruments((make_instrument(100 + i, "NIFTY"),))
+                    client.remove_instruments([100 + i])
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        def ticker_emitter() -> None:
+            try:
+                barrier.wait()
+                for _ in range(20):
+                    fake.emit_ticks([{"instrument_token": 22, "last_price": 2.0}])
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        def reader() -> None:
+            try:
+                barrier.wait()
+                for _ in range(20):
+                    client.get_health()
+                    client.get_dashboard_index_connection_statuses()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [
+                pool.submit(subscriber),
+                pool.submit(ticker_emitter),
+                pool.submit(reader),
+            ]
+            for future in futures:
+                future.result()
+        assert not errors

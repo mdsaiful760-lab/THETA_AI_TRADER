@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 from config.application_configuration import EnvironmentProfile
 
@@ -878,6 +878,8 @@ class KiteWebSocketClient:
             u: 0 for u in config.enabled_underlyings
         }
         self._last_applied_desired_tokens: frozenset[int] = frozenset()
+        self._heartbeat_thread: threading.Thread | None = None
+        self._heartbeat_stop_event = threading.Event()
 
     def __repr__(self) -> str:
         return (
@@ -917,6 +919,50 @@ class KiteWebSocketClient:
             instruments: Externally resolved instruments.
         """
         self._subscriptions.set_instruments(instruments)
+
+    def add_instruments(
+        self, instruments: Sequence[SubscriptionInstrument]
+    ) -> WebSocketSubscriptionEvent | None:
+        """Add instruments to the desired set (dynamic subscribe).
+
+        Merges ``instruments`` into the existing desired set and, when
+        currently connected, immediately pushes the resulting diff to the
+        live ticker via :meth:`apply_subscriptions`. When not connected,
+        only the desired set is updated; call :meth:`apply_subscriptions`
+        after connecting.
+
+        Args:
+            instruments: Additional externally resolved instruments.
+
+        Returns:
+            The resulting subscription event when applied while connected,
+            otherwise ``None``.
+        """
+        self._subscriptions.add_instruments(instruments)
+        if self.get_status() is WebSocketConnectionStatus.CONNECTED:
+            return self.apply_subscriptions()
+        return None
+
+    def remove_instruments(
+        self, tokens: Sequence[int]
+    ) -> WebSocketSubscriptionEvent | None:
+        """Remove instrument tokens from the desired set (dynamic unsubscribe).
+
+        Counterpart to :meth:`add_instruments`: removes ``tokens`` from the
+        desired set and, when currently connected, immediately pushes the
+        resulting diff to the live ticker.
+
+        Args:
+            tokens: Instrument tokens to remove from the desired set.
+
+        Returns:
+            The resulting subscription event when applied while connected,
+            otherwise ``None``.
+        """
+        self._subscriptions.remove_tokens(tokens)
+        if self.get_status() is WebSocketConnectionStatus.CONNECTED:
+            return self.apply_subscriptions()
+        return None
 
     def get_subscriptions(self) -> tuple[SubscriptionRecord, ...]:
         """Return an immutable active subscription snapshot."""
@@ -989,6 +1035,150 @@ class KiteWebSocketClient:
             self._status = WebSocketConnectionStatus.CLOSED
             self._last_applied_desired_tokens = frozenset()
         self._emit_connection(previous, WebSocketConnectionStatus.CLOSED)
+
+    def reconnect(self) -> None:
+        """Actively tear down and re-establish the WebSocket connection.
+
+        Distinct from ``KiteTicker``'s built-in passive auto-reconnect
+        (which recovers from unexpected transport-level drops on its own
+        background thread): this is an explicit, callable recovery path
+        used by the heartbeat monitor when the connection is technically
+        open but silent, and by external callers that want to force a
+        fresh connection. Increments ``reconnect_count`` and, once
+        reconnected, re-applies the current desired subscription set so
+        streaming resumes for the same instruments.
+        """
+        with self._lock:
+            self._reconnect_count += 1
+        self.disconnect()
+        self.connect()
+        if (
+            self.get_status() is WebSocketConnectionStatus.CONNECTED
+            and self._subscriptions.desired()
+        ):
+            try:
+                self.apply_subscriptions()
+            except KiteWebSocketError:
+                _LOGGER.exception("kite_ws.reconnect.apply_subscriptions_failed")
+
+    def check_heartbeat(self) -> bool:
+        """Return whether the global heartbeat is currently healthy.
+
+        Compares time since the most recent tick (across all underlyings)
+        against ``heartbeat_silence_seconds``. Returns ``True`` when no
+        tick has been received yet (nothing to be stale about) or when the
+        connection is not currently ``CONNECTED``/``DEGRADED`` (no ticks
+        are expected while disconnected). Pull-based; use
+        :meth:`start_heartbeat_monitor` for continuous background checks.
+
+        Returns:
+            ``True`` when the heartbeat is healthy, ``False`` when the
+            stream has gone silent for longer than the configured
+            threshold while a connection is expected to be delivering
+            ticks.
+        """
+        with self._lock:
+            status = self._status
+            last_tick = self._last_tick_at
+        if status not in {
+            WebSocketConnectionStatus.CONNECTED,
+            WebSocketConnectionStatus.DEGRADED,
+        }:
+            return True
+        if last_tick is None:
+            return True
+        silence = (self._clock() - last_tick).total_seconds()
+        return silence < self._config.heartbeat_silence_seconds
+
+    def start_heartbeat_monitor(
+        self,
+        *,
+        interval_seconds: float = 1.0,
+        on_stale: Callable[[], None] | None = None,
+    ) -> None:
+        """Start a background thread that periodically checks heartbeat health.
+
+        When :meth:`check_heartbeat` reports staleness, calls ``on_stale``
+        when provided, otherwise calls :meth:`reconnect`. Idempotent —
+        calling again while a monitor thread is already running is a
+        no-op. Runs as a daemon thread; also stopped by
+        :meth:`stop_heartbeat_monitor` and :meth:`shutdown`.
+
+        Args:
+            interval_seconds: Poll interval, in seconds (must be > 0).
+            on_stale: Optional callback invoked instead of the default
+                :meth:`reconnect` when staleness is detected.
+
+        Raises:
+            KiteWebSocketConfigurationError: When ``interval_seconds`` is
+                not positive.
+        """
+        if interval_seconds <= 0:
+            raise KiteWebSocketConfigurationError(
+                "interval_seconds must be > 0.",
+                code="KITE_WS.CONFIG.INVALID",
+                field="interval_seconds",
+            )
+        with self._lock:
+            if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
+                return
+            self._heartbeat_stop_event.clear()
+
+        def _run() -> None:
+            while not self._heartbeat_stop_event.wait(interval_seconds):
+                try:
+                    if not self.check_heartbeat():
+                        if on_stale is not None:
+                            on_stale()
+                        else:
+                            self.reconnect()
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("kite_ws.heartbeat_monitor.failed")
+
+        thread = threading.Thread(
+            target=_run,
+            name="kite-ws-heartbeat-monitor",
+            daemon=True,
+        )
+        with self._lock:
+            self._heartbeat_thread = thread
+        thread.start()
+
+    def stop_heartbeat_monitor(self, *, timeout: float = 2.0) -> None:
+        """Signal and join the heartbeat monitor thread, if running.
+
+        Safe to call when no monitor is running.
+
+        Args:
+            timeout: Maximum seconds to wait for the thread to exit.
+        """
+        self._heartbeat_stop_event.set()
+        with self._lock:
+            thread = self._heartbeat_thread
+            self._heartbeat_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+
+    def shutdown(self) -> None:
+        """Gracefully stop all background activity and close the connection.
+
+        Stops the heartbeat monitor (if running), disconnects the
+        WebSocket (unsubscribing and closing the ticker), and clears
+        registered handlers. Safe to call multiple times and safe to call
+        when never connected.
+        """
+        self.stop_heartbeat_monitor()
+        with self._lock:
+            status = self._status
+        if status not in {
+            WebSocketConnectionStatus.DISCONNECTED,
+            WebSocketConnectionStatus.CLOSED,
+        }:
+            self.disconnect()
+        with self._lock:
+            self._tick_handler = None
+            self._error_handler = None
+            self._connection_handler = None
 
     def apply_subscriptions(self) -> WebSocketSubscriptionEvent:
         """Diff desired vs active subscriptions and apply via the SDK.
@@ -1406,6 +1596,27 @@ class KiteWebSocketClient:
             self._publish(TOPIC_HEALTH, report)
         return report
 
+    def get_dashboard_connection_snapshot(self) -> "WebSocketDashboardConnectionSnapshot":
+        """Return the dashboard-shaped connection snapshot for the live health report."""
+        return build_dashboard_connection_snapshot(self.get_health())
+
+    def get_dashboard_index_connection_statuses(self) -> Mapping[str, str]:
+        """Return per-underlying dashboard connection-status tokens.
+
+        Returns:
+            Mapping of underlying to one of ``LIVE`` / ``DELAYED`` /
+            ``OFFLINE`` / ``UNKNOWN`` — the exact vocabulary
+            ``dashboard.view_models.IndexQuoteView.connection_status``
+            already expects.
+        """
+        stats = self.get_statistics()
+        return MappingProxyType(
+            {
+                entry.underlying: classify_dashboard_index_status(entry, self._config)
+                for entry in stats.per_underlying
+            }
+        )
+
     def _register_callbacks(self, ticker: Any) -> None:
         """Wire SDK callbacks onto the ticker instance."""
 
@@ -1778,3 +1989,97 @@ def deserialize_websocket_health_report(payload: str) -> WebSocketHealthReport:
         issues=issues,
         statistics=stats,
     )
+
+
+# ---------------------------------------------------------------------------
+# Dashboard status integration
+#
+# Pure, read-only presentation mappings from WebSocket connection/health
+# state to shapes the dashboard package already knows how to render:
+# ``dashboard.dashboard_facade`` soft-reads a ``broker_connection`` object
+# with ``state``/``connected`` off of ``session.get_health()``, and
+# ``dashboard.view_models.IndexQuoteView``/``HomeIndexQuote`` render a
+# per-symbol ``connection_status`` of ``LIVE`` / ``DELAYED`` / ``OFFLINE`` /
+# ``UNKNOWN``. Kept inside this module (not the dashboard package) so
+# connection/status cards can reflect real streaming state without this
+# module importing the dashboard package.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WebSocketDashboardConnectionSnapshot:
+    """``broker_connection`` sub-object shape expected by the dashboard facade."""
+
+    state: str
+    connected: bool
+    message: str
+
+
+_DASHBOARD_STATE_BY_WS_STATUS: Final[Mapping[WebSocketConnectionStatus, str]] = {
+    WebSocketConnectionStatus.CONNECTED: "connected",
+    WebSocketConnectionStatus.CONNECTING: "connecting",
+    WebSocketConnectionStatus.RECONNECTING: "reconnecting",
+    WebSocketConnectionStatus.DEGRADED: "degraded",
+    WebSocketConnectionStatus.DISCONNECTED: "disconnected",
+    WebSocketConnectionStatus.CLOSED: "disconnected",
+    WebSocketConnectionStatus.FAILED: "failed",
+}
+
+
+def build_dashboard_connection_snapshot(
+    report: WebSocketHealthReport,
+) -> WebSocketDashboardConnectionSnapshot:
+    """Map a :class:`WebSocketHealthReport` to the dashboard's connection shape.
+
+    Read-only presentation mapping — never mutates connection state and
+    never fabricates values beyond relabeling already-known status fields.
+
+    Args:
+        report: Health snapshot from :meth:`KiteWebSocketClient.get_health`.
+
+    Returns:
+        Dashboard-shaped connection snapshot.
+    """
+    state = _DASHBOARD_STATE_BY_WS_STATUS.get(report.connection_status, "unknown")
+    connected = report.connection_status is WebSocketConnectionStatus.CONNECTED
+    if report.issues:
+        message = report.issues[0].message
+    elif connected:
+        message = "Market data stream connected"
+    else:
+        message = "Market data stream not connected"
+    return WebSocketDashboardConnectionSnapshot(
+        state=state,
+        connected=connected,
+        message=message,
+    )
+
+
+def classify_dashboard_index_status(
+    entry: UnderlyingStreamStats,
+    config: KiteWebSocketConfig,
+) -> str:
+    """Map one underlying's stream stats to a dashboard index-status token.
+
+    Read-only presentation mapping over already-computed statistics — never
+    recomputes tick counts or silence durations.
+
+    Args:
+        entry: Per-underlying streaming statistics.
+        config: Active WebSocket configuration (for the silence threshold).
+
+    Returns:
+        One of ``LIVE`` / ``DELAYED`` / ``OFFLINE`` / ``UNKNOWN`` — the
+        exact vocabulary ``dashboard.view_models.IndexQuoteView`` and
+        ``HomeIndexQuote`` already expect for ``connection_status``.
+    """
+    if entry.active_instrument_count == 0:
+        return "OFFLINE"
+    if entry.last_tick_at is None:
+        return "UNKNOWN"
+    if (
+        entry.seconds_since_last_tick is not None
+        and entry.seconds_since_last_tick >= config.per_underlying_silence_seconds
+    ):
+        return "DELAYED"
+    return "LIVE"
