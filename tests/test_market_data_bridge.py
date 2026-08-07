@@ -16,16 +16,20 @@ from broker.market_data_bridge import (
     build_tick_event,
 )
 from broker.market_data_streaming import (
+    GreeksAttachment,
     MarketDataStreamingEngine,
     MarketDataStreamingError,
     TickEvent,
 )
+from option_greeks_engine import OptionGreeksEngine
 from tests.test_kite_websocket import FakeKiteTicker, make_client
 from tests.test_market_data_streaming import (
+    future_descriptor,
     make_config,
     make_engine,
     option_descriptor,
     spot_descriptor,
+    vix_descriptor,
 )
 
 FIXED_NOW = datetime(2026, 8, 7, 5, 0, tzinfo=timezone.utc)
@@ -88,7 +92,7 @@ def make_bridge(
 ) -> tuple[WebSocketMarketDataBridge, Any, Any]:
     """Build a bridge wired to a real KiteWebSocketClient and streaming engine."""
     ws_client, fake = make_client(underlyings=underlyings, clock=clock, ticker=ticker)
-    engine = streaming_engine or make_engine(underlyings, clock=clock)
+    engine = streaming_engine or make_engine(underlyings, clock=clock, min_complete_pairs=0)
     bridge = WebSocketMarketDataBridge(
         ws_client=ws_client, streaming_engine=engine, clock=clock
     )
@@ -453,3 +457,262 @@ class TestModuleMetadata:
 
     def test_version_defined(self) -> None:
         assert MARKET_DATA_BRIDGE_VERSION == "1.0.0"
+
+
+class TestBuildTickEventGreeksPassthrough:
+    """build_tick_event(): greeks parameter is attached as-is, never computed."""
+
+    def test_attaches_provided_greeks(self) -> None:
+        descriptor = option_descriptor(1011, "NIFTY", 24500.0, "CE")
+        attachment = GreeksAttachment(delta=0.5, gamma=0.01, theta=-9.0, vega=12.0, iv=0.15)
+        event = build_tick_event(
+            raw_option_tick(1011), descriptor, received_at=FIXED_NOW, greeks=attachment
+        )
+        assert event.greeks is attachment
+
+    def test_defaults_to_none(self) -> None:
+        descriptor = option_descriptor(1011, "NIFTY", 24500.0, "CE")
+        event = build_tick_event(raw_option_tick(1011), descriptor, received_at=FIXED_NOW)
+        assert event.greeks is None
+
+
+class TestGreeksIntegration:
+    """Option ticks are enriched with Delta/Gamma/Theta/Vega/IV via the
+    existing option_greeks_engine.OptionGreeksEngine before forwarding."""
+
+    def test_option_tick_gets_greeks_when_spot_known(self) -> None:
+        bridge, ws_client, fake = make_bridge()
+        bridge._streaming_engine.start()
+        bridge.register_instruments(
+            [
+                spot_descriptor(1001, "NIFTY"),
+                option_descriptor(1011, "NIFTY", 24500.0, "CE", expiry="2026-08-13"),
+            ]
+        )
+        bridge.start()
+        ws_client.connect()
+
+        fake.emit_ticks([raw_index_tick(1001, last_price=24512.5)])
+        fake.emit_ticks([raw_option_tick(1011, last_price=120.0, bid=119.5, ask=120.5)])
+
+        snapshot = bridge._streaming_engine.get_snapshot("NIFTY")
+        assert snapshot is not None
+        contract = snapshot.option_chain.contracts[0]
+        assert contract.delta is not None
+        assert contract.gamma is not None
+        assert contract.theta is not None
+        assert contract.vega is not None
+        assert contract.iv is not None
+        assert 0.0 < contract.iv < 5.0  # decimal fraction, not a percentage
+
+        stats = bridge.get_statistics()
+        assert stats.ticks_with_greeks == 1
+        assert stats.ticks_greeks_unavailable == 0
+
+    def test_option_tick_no_greeks_when_spot_unknown(self) -> None:
+        bridge, ws_client, fake = make_bridge()
+        bridge._streaming_engine.start()
+        bridge.register_instruments(
+            [
+                spot_descriptor(1001, "NIFTY"),
+                option_descriptor(1011, "NIFTY", 24500.0, "CE", expiry="2026-08-13"),
+            ]
+        )
+        bridge.start()
+        ws_client.connect()
+
+        # Option tick arrives before any spot tick has been seen -- no
+        # snapshot can assemble yet either way (SPOT quote is required),
+        # so assert directly on the bridge's own forwarding outcome.
+        fake.emit_ticks([raw_option_tick(1011, last_price=120.0, bid=119.5, ask=120.5)])
+
+        stats = bridge.get_statistics()
+        assert stats.ticks_forwarded == 1
+        assert stats.ticks_with_greeks == 0
+        assert stats.ticks_greeks_unavailable == 1
+
+    def test_spot_tick_itself_has_no_greeks(self) -> None:
+        bridge, ws_client, fake = make_bridge()
+        bridge.register_instruments([spot_descriptor(1001, "NIFTY")])
+        bridge.start()
+        ws_client.connect()
+
+        fake.emit_ticks([raw_index_tick(1001)])
+
+        stats = bridge.get_statistics()
+        assert stats.ticks_forwarded == 1
+        assert stats.ticks_with_greeks == 0
+        assert stats.ticks_greeks_unavailable == 0
+
+    def test_vix_tick_has_no_greeks(self) -> None:
+        bridge, ws_client, fake = make_bridge()
+        bridge._streaming_engine.start()
+        bridge.register_instruments([spot_descriptor(1001, "NIFTY"), vix_descriptor(4001, "NIFTY")])
+        bridge.start()
+        ws_client.connect()
+
+        fake.emit_ticks([raw_index_tick(1001, last_price=24512.5)])
+        fake.emit_ticks([raw_index_tick(4001, last_price=13.5)])
+
+        stats = bridge.get_statistics()
+        assert stats.ticks_with_greeks == 0
+        assert stats.ticks_greeks_unavailable == 0
+
+    def test_future_tick_has_no_greeks(self) -> None:
+        bridge, ws_client, fake = make_bridge()
+        bridge._streaming_engine.start()
+        bridge.register_instruments(
+            [spot_descriptor(1001, "NIFTY"), future_descriptor(3001, "NIFTY")]
+        )
+        bridge.start()
+        ws_client.connect()
+
+        fake.emit_ticks([raw_index_tick(1001, last_price=24512.5)])
+        fake.emit_ticks([raw_index_tick(3001, last_price=24530.0)])
+
+        stats = bridge.get_statistics()
+        assert stats.ticks_with_greeks == 0
+        assert stats.ticks_greeks_unavailable == 0
+
+    def test_greeks_source_and_computed_at_set(self) -> None:
+        bridge, ws_client, fake = make_bridge()
+        bridge._streaming_engine.start()
+        bridge.register_instruments(
+            [spot_descriptor(1001, "NIFTY"), option_descriptor(1011, "NIFTY", 24500.0, "CE")]
+        )
+        bridge.start()
+        ws_client.connect()
+
+        fake.emit_ticks([raw_index_tick(1001, last_price=24512.5)])
+        fake.emit_ticks([raw_option_tick(1011)])
+
+        snapshot = bridge._streaming_engine.get_snapshot("NIFTY")
+        # Greeks are consumed into flat contract fields by the streaming
+        # engine; verify via a direct _compute_greeks call for attachment
+        # metadata (source/computed_at) not exposed on OptionContractSnapshot.
+        descriptor = option_descriptor(1011, "NIFTY", 24500.0, "CE")
+        attachment = bridge._compute_greeks(
+            descriptor, raw_option_tick(1011), received_at=FIXED_NOW
+        )
+        assert attachment is not None
+        assert attachment.source == "option_greeks_engine"
+        assert attachment.computed_at == FIXED_NOW
+
+    def test_greeks_engine_failure_does_not_break_tick_forwarding(self) -> None:
+        class _RaisingGreeksEngine(OptionGreeksEngine):
+            def enrich_contract(self, *args, **kwargs):
+                raise RuntimeError("greeks boom")
+
+        bridge, ws_client, fake = make_bridge()
+        bridge._streaming_engine.start()
+        bridge._greeks_engine = _RaisingGreeksEngine()
+        bridge.register_instruments(
+            [spot_descriptor(1001, "NIFTY"), option_descriptor(1011, "NIFTY", 24500.0, "CE")]
+        )
+        bridge.start()
+        ws_client.connect()
+
+        fake.emit_ticks([raw_index_tick(1001, last_price=24512.5)])
+        fake.emit_ticks([raw_option_tick(1011)])  # must not raise
+
+        stats = bridge.get_statistics()
+        assert stats.ticks_forwarded == 2
+        assert stats.ticks_dropped_error == 0
+        snapshot = bridge._streaming_engine.get_snapshot("NIFTY")
+        assert snapshot.option_chain.contracts[0].delta is None
+
+    def test_invalid_greeks_result_yields_none(self) -> None:
+        class _AlwaysInvalidGreeksEngine(OptionGreeksEngine):
+            def enrich_contract(self, *args, **kwargs):
+                return {"valid": False, "reason": "TEST", "errors": [], "contract": None}
+
+        bridge, ws_client, fake = make_bridge()
+        bridge._streaming_engine.start()
+        bridge._greeks_engine = _AlwaysInvalidGreeksEngine()
+        bridge.register_instruments(
+            [spot_descriptor(1001, "NIFTY"), option_descriptor(1011, "NIFTY", 24500.0, "CE")]
+        )
+        bridge.start()
+        ws_client.connect()
+
+        fake.emit_ticks([raw_index_tick(1001, last_price=24512.5)])
+        fake.emit_ticks([raw_option_tick(1011)])
+
+        assert bridge.get_statistics().ticks_greeks_unavailable == 1
+        assert bridge.get_statistics().ticks_with_greeks == 0
+
+    def test_custom_greeks_engine_injection(self) -> None:
+        calls: list = []
+
+        class _SpyGreeksEngine(OptionGreeksEngine):
+            def enrich_contract(self, contract, **kwargs):
+                calls.append(contract["tradingsymbol"])
+                return super().enrich_contract(contract, **kwargs)
+
+        ws_client, fake = make_client(underlyings=("NIFTY",), clock=fixed_clock)
+        engine = make_engine(("NIFTY",), clock=fixed_clock)
+        bridge = WebSocketMarketDataBridge(
+            ws_client=ws_client,
+            streaming_engine=engine,
+            greeks_engine=_SpyGreeksEngine(),
+            clock=fixed_clock,
+        )
+        bridge.register_instruments(
+            [spot_descriptor(1001, "NIFTY"), option_descriptor(1011, "NIFTY", 24500.0, "CE")]
+        )
+        bridge.start()
+        ws_client.connect()
+
+        fake.emit_ticks([raw_index_tick(1001, last_price=24512.5)])
+        fake.emit_ticks([raw_option_tick(1011)])
+
+        assert calls  # custom engine instance was actually invoked
+
+    def test_missing_option_metadata_on_descriptor_skips_greeks(self) -> None:
+        # MarketDataStreamingEngine.register_instruments() itself rejects
+        # option descriptors missing strike/option_type/expiry, so this
+        # exercises _compute_greeks directly (the bridge's own defensive
+        # guard, independent of the engine's registration validation).
+        from broker.market_data_streaming import InstrumentDescriptor, InstrumentRole
+
+        bridge, _, _ = make_bridge()
+        bridge.register_instruments([spot_descriptor(1001, "NIFTY")])
+        bridge._on_tick(raw_index_tick(1001, last_price=24512.5))
+
+        incomplete_descriptor = InstrumentDescriptor(
+            instrument_token=1011,
+            underlying="NIFTY",
+            quote_key="NFO:NIFTY24500CE",
+            exchange="NFO",
+            tradingsymbol="NIFTY24500CE",
+            instrument_kind="CE",
+            instrument_role=InstrumentRole.OPTION_CE,
+            # strike/option_type/expiry deliberately omitted.
+        )
+        attachment = bridge._compute_greeks(
+            incomplete_descriptor, raw_option_tick(1011), received_at=FIXED_NOW
+        )
+        assert attachment is None
+
+    def test_statistics_track_mixed_greeks_outcomes(self) -> None:
+        bridge, ws_client, fake = make_bridge()
+        bridge._streaming_engine.start()
+        bridge.register_instruments(
+            [
+                spot_descriptor(1001, "NIFTY"),
+                option_descriptor(1011, "NIFTY", 24500.0, "CE"),
+                option_descriptor(1012, "NIFTY", 24500.0, "PE"),
+            ]
+        )
+        bridge.start()
+        ws_client.connect()
+
+        # PE tick arrives before spot -> unavailable; then spot arrives;
+        # then CE tick arrives -> available.
+        fake.emit_ticks([raw_option_tick(1012, last_price=110.0)])
+        fake.emit_ticks([raw_index_tick(1001, last_price=24512.5)])
+        fake.emit_ticks([raw_option_tick(1011, last_price=120.0)])
+
+        stats = bridge.get_statistics()
+        assert stats.ticks_greeks_unavailable == 1
+        assert stats.ticks_with_greeks == 1
